@@ -13,9 +13,13 @@ from torch.utils.data import DataLoader
 from torch.utils.data import TensorDataset
 
 from src.data import build_feature_frame
+from src.features import FEATURE_BLOCK_NAMES
+from src.features import add_spectrum_features
+from src.features import add_structure_features
 from src.features import add_target_family_features
 from src.features import choose_feature_columns
 from src.features import filter_feature_rows
+from src.targets import TargetSpec
 from src.targets import add_next_window_targets
 from src.targets import describe_targets
 from src.targets import get_target_spec
@@ -25,6 +29,7 @@ TRAIN_RATIO = 0.70
 VALID_RATIO = 0.15
 RANDOM_SEED = 0
 DEFAULT_TARGET_COLUMN = "next_sa_ipv4_count"
+DEFAULT_FEATURE_BLOCKS = ("target", "general")
 
 
 @dataclass
@@ -51,6 +56,29 @@ class TargetStandardization:
 
     mean: torch.Tensor
     std: torch.Tensor
+
+
+@dataclass
+class ExperimentResult:
+    """Store summary metrics for one experiment configuration."""
+
+    target: str
+    task_kind: str
+    feature_blocks: tuple[str, ...]
+    feature_count: int
+    epochs: int
+    persistence_valid_mae: float
+    persistence_valid_rmse: float
+    persistence_valid_r2: float
+    persistence_test_mae: float
+    persistence_test_rmse: float
+    persistence_test_r2: float
+    model_valid_mae: float
+    model_valid_rmse: float
+    model_valid_r2: float
+    model_test_mae: float
+    model_test_rmse: float
+    model_test_r2: float
 
 
 class LinearRegressionModel(nn.Module):
@@ -117,8 +145,90 @@ def parse_args() -> argparse.Namespace:
         default=DEFAULT_TARGET_COLUMN,
         help="Regression target column. Default: next_sa_ipv4_count.",
     )
+    parser.add_argument(
+        "--feature-blocks",
+        type=str,
+        default="target,general",
+        help="Comma-separated feature blocks. Available: target,general,context.",
+    )
+    parser.add_argument(
+        "--run-experiments",
+        action="store_true",
+        help="Run a matrix of target/block experiments and print a summary table.",
+    )
+    parser.add_argument(
+        "--experiment-targets",
+        type=str,
+        default=(
+            "next_sa_ipv4_count;"
+            "next_da_ipv4_count;"
+            "next_sa_ipv4_count_delta;"
+            "next_da_ipv4_count_delta"
+        ),
+        help="Semicolon-separated regression targets for experiment mode.",
+    )
+    parser.add_argument(
+        "--experiment-feature-blocks",
+        type=str,
+        default=(
+            "target;"
+            "target,general;"
+            "target,general,spectrum;"
+            "target,general,structure;"
+            "target,general,spectrum,structure"
+        ),
+        help="Semicolon-separated feature-block configs for experiment mode.",
+    )
     args = parser.parse_args()
     return args
+
+
+def parse_feature_blocks(raw_value: str) -> tuple[str, ...]:
+    """Parse requested feature blocks in a stable order."""
+
+    requested = [block.strip() for block in raw_value.split(",") if block.strip()]
+
+    if not requested:
+        return DEFAULT_FEATURE_BLOCKS
+
+    ordered_blocks = [
+        block
+        for block in FEATURE_BLOCK_NAMES
+        if block in requested
+    ]
+    unknown_blocks = sorted(set(requested) - set(FEATURE_BLOCK_NAMES))
+
+    if unknown_blocks:
+        block_list = ", ".join(unknown_blocks)
+        raise ValueError(f"Unknown feature blocks: {block_list}")
+
+    return tuple(ordered_blocks)
+
+
+def parse_experiment_targets(raw_value: str) -> list[str]:
+    """Parse semicolon-separated experiment targets."""
+
+    targets = [value.strip() for value in raw_value.split(";") if value.strip()]
+
+    if not targets:
+        return [DEFAULT_TARGET_COLUMN]
+
+    return targets
+
+
+def parse_experiment_feature_blocks(raw_value: str) -> list[tuple[str, ...]]:
+    """Parse semicolon-separated block configs for experiment mode."""
+
+    block_configs = [
+        parse_feature_blocks(value)
+        for value in raw_value.split(";")
+        if value.strip()
+    ]
+
+    if not block_configs:
+        return [DEFAULT_FEATURE_BLOCKS]
+
+    return block_configs
 
 
 def split_by_time(frame: pd.DataFrame) -> tuple[pd.DataFrame, pd.DataFrame, pd.DataFrame]:
@@ -140,6 +250,18 @@ def validate_target_column(frame: pd.DataFrame, target_column: str) -> None:
     """Fail early if the requested target column is missing."""
 
     get_target_spec(target_column)
+
+
+def validate_target_kind(target_spec: TargetSpec) -> None:
+    """Reject unsupported task kinds for the current runner."""
+
+    if target_spec.task_kind != "direction":
+        return
+
+    raise ValueError(
+        "Direction targets are classification tasks. "
+        "This runner currently supports regression only."
+    )
 
 
 def filter_target_rows(frame: pd.DataFrame, target_column: str) -> pd.DataFrame:
@@ -240,6 +362,7 @@ def train_model(
     target_stats: TargetStandardization,
     epochs: int,
     learning_rate: float,
+    report_progress: bool = True,
 ) -> None:
     """Fit the linear regression model."""
 
@@ -256,7 +379,7 @@ def train_model(
             loss.backward()
             optimizer.step()
 
-        if (epoch + 1) % 25 == 0 or epoch == 0:
+        if report_progress and ((epoch + 1) % 25 == 0 or epoch == 0):
             valid_metrics = evaluate_model(model, valid_split, target_stats)
             print(
                 f"epoch={epoch + 1} "
@@ -289,17 +412,12 @@ def predict(
     return predictions
 
 
-def evaluate_model(
-    model: nn.Module,
-    split: SplitData,
-    target_stats: TargetStandardization,
+def evaluate_predictions(
+    predictions: torch.Tensor,
+    actual_targets: torch.Tensor,
 ) -> dict[str, float]:
     """Compute a few easy-to-read regression metrics."""
 
-    predictions = predict(model, split, target_stats)
-    actual_targets = torch.tensor(
-        split.frame[split.target_column].to_numpy(dtype="float32")
-    )
     residuals = predictions - actual_targets
     mae = residuals.abs().mean().item()
     rmse = residuals.square().mean().sqrt().item()
@@ -309,6 +427,189 @@ def evaluate_model(
     r2 = 1.0 - (residual_sum_of_squares / total_sum_of_squares).item()
     metrics = {"mae": mae, "rmse": rmse, "r2": r2}
     return metrics
+
+
+def evaluate_model(
+    model: nn.Module,
+    split: SplitData,
+    target_stats: TargetStandardization,
+) -> dict[str, float]:
+    """Evaluate the learned model on one split."""
+
+    predictions = predict(model, split, target_stats)
+    actual_targets = torch.tensor(
+        split.frame[split.target_column].to_numpy(dtype="float32")
+    )
+    return evaluate_predictions(predictions, actual_targets)
+
+
+def make_persistence_predictions(
+    frame: pd.DataFrame,
+    target_spec: TargetSpec,
+) -> torch.Tensor:
+    """Build naive regression predictions for the selected target."""
+
+    if target_spec.task_kind == "exact_count":
+        values = frame[target_spec.source_column].to_numpy(dtype="float32")
+        return torch.tensor(values)
+
+    if target_spec.task_kind == "delta":
+        return torch.zeros(len(frame), dtype=torch.float32)
+
+    raise ValueError(f"Unsupported persistence baseline for {target_spec.task_kind}")
+
+
+def evaluate_persistence_baseline(
+    split: SplitData,
+    target_spec: TargetSpec,
+) -> dict[str, float]:
+    """Evaluate naive current-window persistence on one split."""
+
+    predictions = make_persistence_predictions(split.frame, target_spec)
+    actual_targets = torch.tensor(
+        split.frame[split.target_column].to_numpy(dtype="float32")
+    )
+    return evaluate_predictions(predictions, actual_targets)
+
+
+def build_modeling_frame(database_path: Path) -> pd.DataFrame:
+    """Load the modeling frame once before running experiments."""
+
+    frame = build_feature_frame(database_path)
+    frame = add_next_window_targets(frame)
+    return frame
+
+
+def prepare_experiment_frame(
+    frame: pd.DataFrame,
+    target_spec: TargetSpec,
+    target_column: str,
+    feature_blocks: tuple[str, ...],
+) -> tuple[pd.DataFrame, list[str]]:
+    """Build feature columns and filter rows for one experiment."""
+
+    experiment_frame = add_target_family_features(frame, target_spec.source_column)
+
+    if "spectrum" in feature_blocks:
+        experiment_frame = add_spectrum_features(
+            experiment_frame,
+            target_spec.source_column,
+        )
+
+    if "structure" in feature_blocks:
+        experiment_frame = add_structure_features(
+            experiment_frame,
+            target_spec.source_column,
+        )
+
+    feature_columns = choose_feature_columns(
+        experiment_frame,
+        target_spec.source_column,
+        feature_blocks=feature_blocks,
+    )
+    experiment_frame = filter_feature_rows(experiment_frame, feature_columns)
+    experiment_frame = filter_target_rows(experiment_frame, target_column)
+    return experiment_frame, feature_columns
+
+
+def run_regression_experiment(
+    frame: pd.DataFrame,
+    target_column: str,
+    feature_blocks: tuple[str, ...],
+    epochs: int,
+    learning_rate: float,
+    batch_size: int,
+    report_progress: bool,
+) -> tuple[ExperimentResult, SplitData, TargetStandardization, nn.Module]:
+    """Run one regression experiment and return summary artifacts."""
+
+    validate_target_column(frame, target_column)
+    target_spec = get_target_spec(target_column)
+    validate_target_kind(target_spec)
+    experiment_frame, feature_columns = prepare_experiment_frame(
+        frame=frame,
+        target_spec=target_spec,
+        target_column=target_column,
+        feature_blocks=feature_blocks,
+    )
+    train_frame, valid_frame, test_frame = split_by_time(experiment_frame)
+    train_split = to_split(train_frame, feature_columns, target_column)
+    valid_split = to_split(valid_frame, feature_columns, target_column)
+    test_split = to_split(test_frame, feature_columns, target_column)
+    persistence_valid_metrics = evaluate_persistence_baseline(valid_split, target_spec)
+    persistence_test_metrics = evaluate_persistence_baseline(test_split, target_spec)
+    feature_stats = compute_standardization(train_split)
+    target_stats = compute_target_standardization(train_split)
+    train_split = standardize_split(train_split, feature_stats)
+    valid_split = standardize_split(valid_split, feature_stats)
+    test_split = standardize_split(test_split, feature_stats)
+    train_split = standardize_targets(train_split, target_stats)
+    valid_split = standardize_targets(valid_split, target_stats)
+    test_split = standardize_targets(test_split, target_stats)
+    train_loader = make_loader(train_split, batch_size, shuffle=True)
+    model = LinearRegressionModel(feature_count=len(feature_columns))
+    train_model(
+        model=model,
+        train_loader=train_loader,
+        valid_split=valid_split,
+        target_stats=target_stats,
+        epochs=epochs,
+        learning_rate=learning_rate,
+        report_progress=report_progress,
+    )
+    valid_metrics = evaluate_model(model, valid_split, target_stats)
+    test_metrics = evaluate_model(model, test_split, target_stats)
+    result = ExperimentResult(
+        target=target_column,
+        task_kind=target_spec.task_kind,
+        feature_blocks=feature_blocks,
+        feature_count=len(feature_columns),
+        epochs=epochs,
+        persistence_valid_mae=persistence_valid_metrics["mae"],
+        persistence_valid_rmse=persistence_valid_metrics["rmse"],
+        persistence_valid_r2=persistence_valid_metrics["r2"],
+        persistence_test_mae=persistence_test_metrics["mae"],
+        persistence_test_rmse=persistence_test_metrics["rmse"],
+        persistence_test_r2=persistence_test_metrics["r2"],
+        model_valid_mae=valid_metrics["mae"],
+        model_valid_rmse=valid_metrics["rmse"],
+        model_valid_r2=valid_metrics["r2"],
+        model_test_mae=test_metrics["mae"],
+        model_test_rmse=test_metrics["rmse"],
+        model_test_r2=test_metrics["r2"],
+    )
+    return result, test_split, target_stats, model
+
+
+def print_experiment_summary(results: list[ExperimentResult]) -> None:
+    """Print a compact experiment comparison table."""
+
+    summary_rows = []
+
+    for result in results:
+        summary_rows.append(
+            {
+                "target": result.target,
+                "blocks": ",".join(result.feature_blocks),
+                "features": result.feature_count,
+                "epochs": result.epochs,
+                "persist_test_mae": round(result.persistence_test_mae, 2),
+                "model_test_mae": round(result.model_test_mae, 2),
+                "mae_delta": round(
+                    result.model_test_mae - result.persistence_test_mae,
+                    2,
+                ),
+                "persist_test_r2": round(result.persistence_test_r2, 6),
+                "model_test_r2": round(result.model_test_r2, 6),
+                "r2_delta": round(
+                    result.model_test_r2 - result.persistence_test_r2,
+                    6,
+                ),
+            }
+        )
+
+    summary_frame = pd.DataFrame(summary_rows)
+    print(summary_frame.to_string(index=False))
 
 
 def show_test_examples(
@@ -380,51 +681,83 @@ def main() -> None:
 
     torch.manual_seed(RANDOM_SEED)
     args = parse_args()
-    frame = build_feature_frame(args.database)
-    frame = add_next_window_targets(frame)
-    validate_target_column(frame, args.target)
+    frame = build_modeling_frame(args.database)
 
     if args.describe_targets:
         target_summary = describe_targets(frame)
         print(target_summary.to_string(index=False))
         return
 
-    target_spec = get_target_spec(args.target)
-    frame = add_target_family_features(frame, target_spec.source_column)
-    feature_columns = choose_feature_columns(frame, target_spec.source_column)
-    frame = filter_feature_rows(frame, feature_columns)
-    frame = filter_target_rows(frame, args.target)
-    train_frame, valid_frame, test_frame = split_by_time(frame)
-    train_split = to_split(train_frame, feature_columns, args.target)
-    valid_split = to_split(valid_frame, feature_columns, args.target)
-    test_split = to_split(test_frame, feature_columns, args.target)
-    feature_stats = compute_standardization(train_split)
-    target_stats = compute_target_standardization(train_split)
-    train_split = standardize_split(train_split, feature_stats)
-    valid_split = standardize_split(valid_split, feature_stats)
-    test_split = standardize_split(test_split, feature_stats)
-    train_split = standardize_targets(train_split, target_stats)
-    valid_split = standardize_targets(valid_split, target_stats)
-    test_split = standardize_targets(test_split, target_stats)
-    train_loader = make_loader(train_split, args.batch_size, shuffle=True)
-    model = LinearRegressionModel(feature_count=len(feature_columns))
-    train_model(
-        model=model,
-        train_loader=train_loader,
-        valid_split=valid_split,
-        target_stats=target_stats,
+    if args.run_experiments:
+        targets = parse_experiment_targets(args.experiment_targets)
+        block_configs = parse_experiment_feature_blocks(
+            args.experiment_feature_blocks
+        )
+        results: list[ExperimentResult] = []
+
+        for target_column in targets:
+            for feature_blocks in block_configs:
+                result, _, _, _ = run_regression_experiment(
+                    frame=frame,
+                    target_column=target_column,
+                    feature_blocks=feature_blocks,
+                    epochs=args.epochs,
+                    learning_rate=args.learning_rate,
+                    batch_size=args.batch_size,
+                    report_progress=False,
+                )
+                results.append(result)
+
+        print_experiment_summary(results)
+        return
+
+    feature_blocks = parse_feature_blocks(args.feature_blocks)
+    result, test_split, target_stats, model = run_regression_experiment(
+        frame=frame,
+        target_column=args.target,
+        feature_blocks=feature_blocks,
         epochs=args.epochs,
         learning_rate=args.learning_rate,
+        batch_size=args.batch_size,
+        report_progress=True,
     )
-    valid_metrics = evaluate_model(model, valid_split, target_stats)
-    test_metrics = evaluate_model(model, test_split, target_stats)
+    print()
+    print("Feature blocks:")
+    print(",".join(feature_blocks))
+    print()
+    print("Persistence baseline metrics:")
+    print(f"target={args.target}")
+    print(
+        "validation="
+        f"{{'mae': {result.persistence_valid_mae}, "
+        f"'rmse': {result.persistence_valid_rmse}, "
+        f"'r2': {result.persistence_valid_r2}}}"
+    )
+    print(
+        "test="
+        f"{{'mae': {result.persistence_test_mae}, "
+        f"'rmse': {result.persistence_test_rmse}, "
+        f"'r2': {result.persistence_test_r2}}}"
+    )
     print()
     print("Validation metrics:")
     print(f"target={args.target}")
-    print(valid_metrics)
+    print(
+        {
+            "mae": result.model_valid_mae,
+            "rmse": result.model_valid_rmse,
+            "r2": result.model_valid_r2,
+        }
+    )
     print()
     print("Test metrics:")
-    print(test_metrics)
+    print(
+        {
+            "mae": result.model_test_mae,
+            "rmse": result.model_test_rmse,
+            "r2": result.model_test_r2,
+        }
+    )
     show_test_examples(model, test_split, target_stats)
     show_requested_prediction(
         model,

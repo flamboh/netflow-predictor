@@ -58,14 +58,36 @@ def load_base_frame(database_path: Path) -> pd.DataFrame:
     FROM protocol_stats
     WHERE granularity = '5m'
     """
+    spectrum_query = """
+    SELECT
+        router,
+        bucket_start AS timestamp,
+        spectrum_json_sa,
+        spectrum_json_da
+    FROM spectrum_stats
+    WHERE granularity = '5m' AND ip_version = 4
+    """
+    structure_query = """
+    SELECT
+        router,
+        bucket_start AS timestamp,
+        structure_json_sa,
+        structure_json_da
+    FROM structure_stats
+    WHERE granularity = '5m' AND ip_version = 4
+    """
 
     netflow = read_table(connection, netflow_query)
     ip_stats = read_table(connection, ip_query)
     protocol_stats = read_table(connection, protocol_query)
+    spectrum_stats = read_table(connection, spectrum_query)
+    structure_stats = read_table(connection, structure_query)
     connection.close()
 
     merged = netflow.merge(ip_stats, on=["router", "timestamp"], how="left")
     merged = merged.merge(protocol_stats, on=["router", "timestamp"], how="left")
+    merged = merged.merge(spectrum_stats, on=["router", "timestamp"], how="left")
+    merged = merged.merge(structure_stats, on=["router", "timestamp"], how="left")
     return merged
 
 
