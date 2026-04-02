@@ -3,7 +3,6 @@
 from __future__ import annotations
 
 import argparse
-import sqlite3
 from dataclasses import dataclass
 from pathlib import Path
 
@@ -13,12 +12,15 @@ from torch import nn
 from torch.utils.data import DataLoader
 from torch.utils.data import TensorDataset
 
+from src.data import build_feature_frame
+from src.targets import add_next_window_targets
+from src.targets import describe_targets
 
-SECONDS_PER_HOUR = 60 * 60
-SECONDS_PER_DAY = 24 * SECONDS_PER_HOUR
+
 TRAIN_RATIO = 0.70
 VALID_RATIO = 0.15
 RANDOM_SEED = 0
+DEFAULT_TARGET_COLUMN = "next_sa_ipv4_count"
 
 
 @dataclass
@@ -28,6 +30,7 @@ class SplitData:
     features: torch.Tensor
     targets: torch.Tensor
     frame: pd.DataFrame
+    target_column: str
 
 
 @dataclass
@@ -99,138 +102,19 @@ def parse_args() -> argparse.Namespace:
         default=None,
         help="Optional 5-minute trace timestamp for a single prediction lookup.",
     )
+    parser.add_argument(
+        "--describe-targets",
+        action="store_true",
+        help="Print derived next-window target summaries and exit.",
+    )
+    parser.add_argument(
+        "--target",
+        type=str,
+        default=DEFAULT_TARGET_COLUMN,
+        help="Regression target column. Default: next_sa_ipv4_count.",
+    )
     args = parser.parse_args()
     return args
-
-
-def read_table(connection: sqlite3.Connection, query: str) -> pd.DataFrame:
-    """Load a SQL query into a DataFrame."""
-
-    frame = pd.read_sql_query(query, connection)
-    return frame
-
-
-def load_base_frame(database_path: Path) -> pd.DataFrame:
-    """Load and join the small set of tables used by the baseline model."""
-
-    connection = sqlite3.connect(database_path)
-
-    netflow_query = """
-    SELECT
-        router,
-        timestamp,
-        flows,
-        packets,
-        bytes,
-        flows_tcp,
-        flows_udp,
-        bytes_tcp,
-        bytes_udp
-    FROM netflow_stats
-    ORDER BY router, timestamp
-    """
-    ip_query = """
-    SELECT
-        router,
-        bucket_start AS timestamp,
-        sa_ipv4_count,
-        da_ipv4_count,
-        sa_ipv6_count,
-        da_ipv6_count
-    FROM ip_stats
-    WHERE granularity = '5m'
-    """
-    protocol_query = """
-    SELECT
-        router,
-        bucket_start AS timestamp,
-        unique_protocols_count_ipv4,
-        unique_protocols_count_ipv6
-    FROM protocol_stats
-    WHERE granularity = '5m'
-    """
-
-    netflow = read_table(connection, netflow_query)
-    ip_stats = read_table(connection, ip_query)
-    protocol_stats = read_table(connection, protocol_query)
-    connection.close()
-
-    merged = netflow.merge(ip_stats, on=["router", "timestamp"], how="left")
-    merged = merged.merge(protocol_stats, on=["router", "timestamp"], how="left")
-    return merged
-
-
-def validate_join_features(frame: pd.DataFrame) -> pd.DataFrame:
-    """Fail early if joined feature tables are missing rows."""
-
-    validated = frame.copy()
-    joined_feature_columns = [
-        "sa_ipv4_count",
-        "da_ipv4_count",
-        "sa_ipv6_count",
-        "da_ipv6_count",
-        "unique_protocols_count_ipv4",
-        "unique_protocols_count_ipv6",
-    ]
-    missing_counts = validated[joined_feature_columns].isna().sum()
-    missing_columns = missing_counts[missing_counts > 0]
-
-    if missing_columns.empty:
-        return validated
-
-    details = ", ".join(
-        f"{column}={count}"
-        for column, count in missing_columns.items()
-    )
-    raise ValueError(
-        "Joined feature tables contain missing values. "
-        f"Missing counts: {details}"
-    )
-
-
-def add_time_features(frame: pd.DataFrame) -> pd.DataFrame:
-    """Create simple clock features from the trace timestamp."""
-
-    enriched = frame.copy()
-    enriched["hour_of_day"] = (enriched["timestamp"] // SECONDS_PER_HOUR) % 24
-    enriched["day_of_week"] = (
-        enriched["timestamp"] // SECONDS_PER_DAY + 3
-    ) % 7
-    return enriched
-
-
-def add_router_features(frame: pd.DataFrame) -> pd.DataFrame:
-    """Create one-hot router features."""
-
-    encoded = frame.copy()
-    encoded["router_name"] = encoded["router"]
-    encoded = pd.get_dummies(encoded, columns=["router"], dtype=float)
-    return encoded
-
-
-def add_lag_features(frame: pd.DataFrame) -> pd.DataFrame:
-    """Add a few previous-trace features for each router."""
-
-    enriched = frame.sort_values(["router", "timestamp"]).copy()
-    router_groups = enriched.groupby("router")
-    enriched["bytes_lag_1"] = router_groups["bytes"].shift(1)
-    enriched["bytes_lag_12"] = router_groups["bytes"].shift(12)
-    enriched["packets_lag_1"] = router_groups["packets"].shift(1)
-    enriched["flows_lag_1"] = router_groups["flows"].shift(1)
-    lag_columns = ["bytes_lag_1", "bytes_lag_12", "packets_lag_1", "flows_lag_1"]
-    enriched = enriched.dropna(subset=lag_columns).reset_index(drop=True)
-    return enriched
-
-
-def build_feature_frame(database_path: Path) -> pd.DataFrame:
-    """Build the final modeling frame."""
-
-    frame = load_base_frame(database_path)
-    frame = validate_join_features(frame)
-    frame = add_time_features(frame)
-    frame = add_lag_features(frame)
-    frame = add_router_features(frame)
-    return frame
 
 
 def choose_feature_columns(frame: pd.DataFrame) -> list[str]:
@@ -279,14 +163,39 @@ def split_by_time(frame: pd.DataFrame) -> tuple[pd.DataFrame, pd.DataFrame, pd.D
     return train_frame, valid_frame, test_frame
 
 
-def to_split(frame: pd.DataFrame, feature_columns: list[str]) -> SplitData:
+def validate_target_column(frame: pd.DataFrame, target_column: str) -> None:
+    """Fail early if the requested target column is missing."""
+
+    if target_column in frame.columns:
+        return
+
+    raise ValueError(f"Unknown target column: {target_column}")
+
+
+def filter_target_rows(frame: pd.DataFrame, target_column: str) -> pd.DataFrame:
+    """Drop rows where the selected target is unavailable."""
+
+    filtered = frame.dropna(subset=[target_column]).reset_index(drop=True)
+    return filtered
+
+
+def to_split(
+    frame: pd.DataFrame,
+    feature_columns: list[str],
+    target_column: str,
+) -> SplitData:
     """Convert one DataFrame split into tensors."""
 
     feature_values = frame[feature_columns].to_numpy(dtype="float32")
-    target_values = frame["bytes"].to_numpy(dtype="float32")
+    target_values = frame[target_column].to_numpy(dtype="float32")
     features = torch.tensor(feature_values)
     targets = torch.tensor(target_values)
-    split = SplitData(features=features, targets=targets, frame=frame)
+    split = SplitData(
+        features=features,
+        targets=targets,
+        frame=frame,
+        target_column=target_column,
+    )
     return split
 
 
@@ -308,6 +217,7 @@ def standardize_split(split: SplitData, stats: Standardization) -> SplitData:
         features=scaled_features,
         targets=split.targets,
         frame=split.frame,
+        target_column=split.target_column,
     )
     return scaled_split
 
@@ -333,6 +243,7 @@ def standardize_targets(
         features=split.features,
         targets=scaled_targets,
         frame=split.frame,
+        target_column=split.target_column,
     )
     return scaled_split
 
@@ -417,7 +328,7 @@ def evaluate_model(
 
     predictions = predict(model, split, target_stats)
     actual_targets = torch.tensor(
-        split.frame["bytes"].to_numpy(dtype="float32")
+        split.frame[split.target_column].to_numpy(dtype="float32")
     )
     residuals = predictions - actual_targets
     mae = residuals.abs().mean().item()
@@ -438,9 +349,14 @@ def show_test_examples(
     """Print a few held-out predictions."""
 
     predictions = predict(model, split, target_stats).cpu().numpy()
-    example_frame = split.frame[["router_name", "timestamp", "bytes"]].copy()
+    example_frame = split.frame[
+        ["router_name", "timestamp", split.target_column]
+    ].copy()
     example_frame = example_frame.rename(columns={"router_name": "router"})
-    example_frame["predicted_bytes"] = predictions
+    example_frame = example_frame.rename(
+        columns={split.target_column: "actual_target"}
+    )
+    example_frame["predicted_target"] = predictions
     print()
     print("Sample test predictions:")
     print(example_frame.head(10).to_string(index=False))
@@ -469,22 +385,24 @@ def show_requested_prediction(
 
     prediction_frame = split.frame.loc[
         matches,
-        ["router_name", "timestamp", "bytes"],
+        ["router_name", "timestamp", split.target_column],
     ].copy()
     prediction_frame = prediction_frame.rename(columns={"router_name": "router"})
     prediction_split = SplitData(
         features=split.features[matches.to_numpy()],
         targets=split.targets[matches.to_numpy()],
         frame=prediction_frame,
+        target_column=split.target_column,
     )
     prediction = predict(model, prediction_split, target_stats).item()
-    actual = prediction_frame["bytes"].iloc[0]
+    actual = prediction_frame[split.target_column].iloc[0]
     print()
     print("Requested trace prediction:")
     print(f"router={router}")
     print(f"timestamp={timestamp}")
-    print(f"predicted_bytes={prediction:.2f}")
-    print(f"actual_bytes={actual:.2f}")
+    print(f"target={split.target_column}")
+    print(f"predicted_value={prediction:.2f}")
+    print(f"actual_value={actual:.2f}")
 
 
 def main() -> None:
@@ -493,11 +411,20 @@ def main() -> None:
     torch.manual_seed(RANDOM_SEED)
     args = parse_args()
     frame = build_feature_frame(args.database)
+    frame = add_next_window_targets(frame)
+    validate_target_column(frame, args.target)
+
+    if args.describe_targets:
+        target_summary = describe_targets(frame)
+        print(target_summary.to_string(index=False))
+        return
+
+    frame = filter_target_rows(frame, args.target)
     feature_columns = choose_feature_columns(frame)
     train_frame, valid_frame, test_frame = split_by_time(frame)
-    train_split = to_split(train_frame, feature_columns)
-    valid_split = to_split(valid_frame, feature_columns)
-    test_split = to_split(test_frame, feature_columns)
+    train_split = to_split(train_frame, feature_columns, args.target)
+    valid_split = to_split(valid_frame, feature_columns, args.target)
+    test_split = to_split(test_frame, feature_columns, args.target)
     feature_stats = compute_standardization(train_split)
     target_stats = compute_target_standardization(train_split)
     train_split = standardize_split(train_split, feature_stats)
@@ -520,6 +447,7 @@ def main() -> None:
     test_metrics = evaluate_model(model, test_split, target_stats)
     print()
     print("Validation metrics:")
+    print(f"target={args.target}")
     print(valid_metrics)
     print()
     print("Test metrics:")
