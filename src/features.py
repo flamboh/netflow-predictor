@@ -30,7 +30,24 @@ FEATURE_BLOCK_NAMES = (
     "context",
     "spectrum",
     "structure",
+    "structure_summary",
+    "structure_tau_samples",
+    "structure_sd_samples",
 )
+
+
+def structure_block_requested(feature_blocks: tuple[str, ...]) -> bool:
+    """Return whether any structure-derived block was requested."""
+
+    return any(
+        block in feature_blocks
+        for block in (
+            "structure",
+            "structure_summary",
+            "structure_tau_samples",
+            "structure_sd_samples",
+        )
+    )
 
 
 def compute_mean(values: list[float]) -> float:
@@ -171,6 +188,37 @@ def make_structure_feature_names(
     names.extend(f"structure_tau_sample_{index}" for index in range(sample_count))
     names.extend(f"structure_sd_sample_{index}" for index in range(sample_count))
     return names
+
+
+def make_structure_summary_feature_names() -> list[str]:
+    """List structure summary feature names."""
+
+    return [
+        "structure_points",
+        "structure_tau_min",
+        "structure_tau_max",
+        "structure_tau_mean",
+        "structure_tau_std",
+        "structure_sd_max",
+        "structure_sd_mean",
+        "structure_sd_std",
+    ]
+
+
+def make_structure_tau_sample_feature_names(
+    sample_count: int = CURVE_SAMPLE_COUNT,
+) -> list[str]:
+    """List sampled structure tau feature names."""
+
+    return [f"structure_tau_sample_{index}" for index in range(sample_count)]
+
+
+def make_structure_sd_sample_feature_names(
+    sample_count: int = CURVE_SAMPLE_COUNT,
+) -> list[str]:
+    """List sampled structure sd feature names."""
+
+    return [f"structure_sd_sample_{index}" for index in range(sample_count)]
 
 
 def summarize_spectrum_curve(curve_json: str) -> pd.Series:
@@ -344,6 +392,15 @@ def choose_feature_columns(
 
     if "structure" in feature_blocks:
         feature_columns.extend(make_structure_feature_names())
+    else:
+        if "structure_summary" in feature_blocks:
+            feature_columns.extend(make_structure_summary_feature_names())
+
+        if "structure_tau_samples" in feature_blocks:
+            feature_columns.extend(make_structure_tau_sample_feature_names())
+
+        if "structure_sd_samples" in feature_blocks:
+            feature_columns.extend(make_structure_sd_sample_feature_names())
 
     if "general" in feature_blocks:
         router_columns = sorted(

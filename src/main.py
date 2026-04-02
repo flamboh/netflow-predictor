@@ -21,6 +21,7 @@ from src.features import add_structure_features
 from src.features import add_target_family_features
 from src.features import choose_feature_columns
 from src.features import filter_feature_rows
+from src.features import structure_block_requested
 from src.targets import TargetSpec
 from src.targets import add_next_window_targets
 from src.targets import describe_targets
@@ -158,7 +159,11 @@ def parse_args() -> argparse.Namespace:
         "--feature-blocks",
         type=str,
         default="target,general",
-        help="Comma-separated feature blocks. Available: target,general,context.",
+        help=(
+            "Comma-separated feature blocks. "
+            "Available: target,general,context,spectrum,structure,"
+            "structure_summary,structure_tau_samples,structure_sd_samples."
+        ),
     )
     parser.add_argument(
         "--run-experiments",
@@ -180,11 +185,12 @@ def parse_args() -> argparse.Namespace:
         "--experiment-feature-blocks",
         type=str,
         default=(
-            "target;"
             "target,general;"
-            "target,general,spectrum;"
-            "target,general,structure;"
-            "target,general,spectrum,structure"
+            "target,general,structure_summary;"
+            "target,general,structure_tau_samples;"
+            "target,general,structure_sd_samples;"
+            "target,general,structure_summary,structure_tau_samples;"
+            "target,general,structure_summary,structure_sd_samples"
         ),
         help="Semicolon-separated feature-block configs for experiment mode.",
     )
@@ -584,7 +590,7 @@ def prepare_experiment_frame(
             target_spec.source_column,
         )
 
-    if "structure" in feature_blocks:
+    if structure_block_requested(feature_blocks):
         experiment_frame = add_structure_features(
             experiment_frame,
             target_spec.source_column,
@@ -741,6 +747,18 @@ def print_experiment_summary(results: list[ExperimentResult]) -> None:
                 "features": result.feature_count,
                 "epochs": result.epochs,
                 "device": result.device,
+                "persist_val_mae": round(result.persistence_valid_mae, 2),
+                "model_val_mae": round(result.model_valid_mae, 2),
+                "val_mae_delta": round(
+                    result.model_valid_mae - result.persistence_valid_mae,
+                    2,
+                ),
+                "persist_val_r2": round(result.persistence_valid_r2, 6),
+                "model_val_r2": round(result.model_valid_r2, 6),
+                "val_r2_delta": round(
+                    result.model_valid_r2 - result.persistence_valid_r2,
+                    6,
+                ),
                 "persist_test_mae": round(result.persistence_test_mae, 2),
                 "model_test_mae": round(result.model_test_mae, 2),
                 "mae_delta": round(
