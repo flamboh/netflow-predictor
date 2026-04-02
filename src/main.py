@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import argparse
 from dataclasses import dataclass
+import math
 from pathlib import Path
 import time
 
@@ -68,6 +69,7 @@ class ExperimentResult:
     feature_blocks: tuple[str, ...]
     feature_count: int
     epochs: int
+    device: str
     persistence_valid_mae: float
     persistence_valid_rmse: float
     persistence_valid_r2: float
@@ -122,6 +124,12 @@ def parse_args() -> argparse.Namespace:
         type=int,
         default=512,
         help="Mini-batch size used during training.",
+    )
+    parser.add_argument(
+        "--device",
+        type=str,
+        default="auto",
+        help="Device to use: auto, cpu, mps, or cuda.",
     )
     parser.add_argument(
         "--router",
@@ -238,6 +246,57 @@ def format_feature_blocks(feature_blocks: tuple[str, ...]) -> str:
     return ",".join(feature_blocks)
 
 
+def resolve_device(requested_device: str) -> torch.device:
+    """Resolve the requested torch device."""
+
+    normalized = requested_device.strip().lower()
+
+    if normalized == "auto":
+        if torch.cuda.is_available():
+            return torch.device("cuda")
+
+        mps_backend = getattr(torch.backends, "mps", None)
+        if mps_backend is not None and mps_backend.is_available():
+            return torch.device("mps")
+
+        return torch.device("cpu")
+
+    if normalized == "cuda":
+        if not torch.cuda.is_available():
+            raise ValueError("CUDA requested but not available.")
+        return torch.device("cuda")
+
+    if normalized == "mps":
+        mps_backend = getattr(torch.backends, "mps", None)
+        if mps_backend is None or not mps_backend.is_available():
+            raise ValueError("MPS requested but not available.")
+        return torch.device("mps")
+
+    if normalized == "cpu":
+        return torch.device("cpu")
+
+    raise ValueError(f"Unknown device: {requested_device}")
+
+
+def move_target_stats(
+    stats: TargetStandardization,
+    device: torch.device,
+) -> TargetStandardization:
+    """Move target scaling tensors onto the selected device."""
+
+    moved = TargetStandardization(
+        mean=stats.mean.to(device),
+        std=stats.std.to(device),
+    )
+    return moved
+
+
+def get_model_device(model: nn.Module) -> torch.device:
+    """Return the device used by the model parameters."""
+
+    return next(model.parameters()).device
+
+
 def split_by_time(frame: pd.DataFrame) -> tuple[pd.DataFrame, pd.DataFrame, pd.DataFrame]:
     """Split the dataset chronologically using unique timestamps."""
 
@@ -347,7 +406,12 @@ def standardize_targets(
     return scaled_split
 
 
-def make_loader(split: SplitData, batch_size: int, shuffle: bool) -> DataLoader:
+def make_loader(
+    split: SplitData,
+    batch_size: int,
+    shuffle: bool,
+    device: torch.device,
+) -> DataLoader:
     """Create a DataLoader for one split."""
 
     generator = torch.Generator()
@@ -358,6 +422,7 @@ def make_loader(split: SplitData, batch_size: int, shuffle: bool) -> DataLoader:
         batch_size=batch_size,
         shuffle=shuffle,
         generator=generator,
+        pin_memory=device.type == "cuda",
     )
     return loader
 
@@ -373,6 +438,7 @@ def train_model(
 ) -> None:
     """Fit the linear regression model."""
 
+    device = get_model_device(model)
     optimizer = torch.optim.Adam(model.parameters(), lr=learning_rate)
     loss_fn = nn.MSELoss()
 
@@ -380,6 +446,8 @@ def train_model(
         model.train()
 
         for feature_batch, target_batch in train_loader:
+            feature_batch = feature_batch.to(device, non_blocking=True)
+            target_batch = target_batch.to(device, non_blocking=True)
             optimizer.zero_grad()
             predictions = model(feature_batch)
             loss = loss_fn(predictions, target_batch)
@@ -399,10 +467,12 @@ def train_model(
 def predict_scaled(model: nn.Module, split: SplitData) -> torch.Tensor:
     """Run the model and return standardized predictions."""
 
+    device = get_model_device(model)
     model.eval()
 
     with torch.no_grad():
-        predictions = model(split.features)
+        features = split.features.to(device)
+        predictions = model(features)
 
     return predictions
 
@@ -414,8 +484,12 @@ def predict(
 ) -> torch.Tensor:
     """Run the model and return predictions on the original target scale."""
 
+    device = get_model_device(model)
     scaled_predictions = predict_scaled(model, split)
-    predictions = scaled_predictions * target_stats.std + target_stats.mean
+    predictions = (
+        scaled_predictions * target_stats.std.to(device)
+        + target_stats.mean.to(device)
+    )
     return predictions
 
 
@@ -445,7 +519,8 @@ def evaluate_model(
 
     predictions = predict(model, split, target_stats)
     actual_targets = torch.tensor(
-        split.frame[split.target_column].to_numpy(dtype="float32")
+        split.frame[split.target_column].to_numpy(dtype="float32"),
+        device=predictions.device,
     )
     return evaluate_predictions(predictions, actual_targets)
 
@@ -477,6 +552,12 @@ def evaluate_persistence_baseline(
         split.frame[split.target_column].to_numpy(dtype="float32")
     )
     return evaluate_predictions(predictions, actual_targets)
+
+
+def metrics_are_finite(metrics: dict[str, float]) -> bool:
+    """Return whether all metric values are finite."""
+
+    return all(math.isfinite(value) for value in metrics.values())
 
 
 def build_modeling_frame(database_path: Path) -> pd.DataFrame:
@@ -519,16 +600,17 @@ def prepare_experiment_frame(
     return experiment_frame, feature_columns
 
 
-def run_regression_experiment(
+def run_regression_experiment_once(
     frame: pd.DataFrame,
     target_column: str,
     feature_blocks: tuple[str, ...],
     epochs: int,
     learning_rate: float,
     batch_size: int,
+    device: torch.device,
     report_progress: bool,
 ) -> tuple[ExperimentResult, SplitData, TargetStandardization, nn.Module]:
-    """Run one regression experiment and return summary artifacts."""
+    """Run one regression experiment on one device."""
 
     validate_target_column(frame, target_column)
     target_spec = get_target_spec(target_column)
@@ -553,8 +635,11 @@ def run_regression_experiment(
     train_split = standardize_targets(train_split, target_stats)
     valid_split = standardize_targets(valid_split, target_stats)
     test_split = standardize_targets(test_split, target_stats)
-    train_loader = make_loader(train_split, batch_size, shuffle=True)
+    train_loader = make_loader(train_split, batch_size, shuffle=True, device=device)
+    target_stats = move_target_stats(target_stats, device)
+    torch.manual_seed(RANDOM_SEED)
     model = LinearRegressionModel(feature_count=len(feature_columns))
+    model = model.to(device)
     train_model(
         model=model,
         train_loader=train_loader,
@@ -572,6 +657,7 @@ def run_regression_experiment(
         feature_blocks=feature_blocks,
         feature_count=len(feature_columns),
         epochs=epochs,
+        device=device.type,
         persistence_valid_mae=persistence_valid_metrics["mae"],
         persistence_valid_rmse=persistence_valid_metrics["rmse"],
         persistence_valid_r2=persistence_valid_metrics["r2"],
@@ -588,6 +674,60 @@ def run_regression_experiment(
     return result, test_split, target_stats, model
 
 
+def run_regression_experiment(
+    frame: pd.DataFrame,
+    target_column: str,
+    feature_blocks: tuple[str, ...],
+    epochs: int,
+    learning_rate: float,
+    batch_size: int,
+    device: torch.device,
+    report_progress: bool,
+) -> tuple[ExperimentResult, SplitData, TargetStandardization, nn.Module]:
+    """Run one regression experiment and retry on CPU if MPS goes non-finite."""
+
+    result, test_split, target_stats, model = run_regression_experiment_once(
+        frame=frame,
+        target_column=target_column,
+        feature_blocks=feature_blocks,
+        epochs=epochs,
+        learning_rate=learning_rate,
+        batch_size=batch_size,
+        device=device,
+        report_progress=report_progress,
+    )
+
+    model_metrics_are_finite = metrics_are_finite(
+        {
+            "valid_mae": result.model_valid_mae,
+            "valid_rmse": result.model_valid_rmse,
+            "valid_r2": result.model_valid_r2,
+            "test_mae": result.model_test_mae,
+            "test_rmse": result.model_test_rmse,
+            "test_r2": result.model_test_r2,
+        }
+    )
+
+    if device.type != "mps" or model_metrics_are_finite:
+        return result, test_split, target_stats, model
+
+    print(
+        "Warning: non-finite metrics on MPS; retrying on CPU "
+        f"for target={target_column} blocks={format_feature_blocks(feature_blocks)}",
+        flush=True,
+    )
+    return run_regression_experiment_once(
+        frame=frame,
+        target_column=target_column,
+        feature_blocks=feature_blocks,
+        epochs=epochs,
+        learning_rate=learning_rate,
+        batch_size=batch_size,
+        device=torch.device("cpu"),
+        report_progress=report_progress,
+    )
+
+
 def print_experiment_summary(results: list[ExperimentResult]) -> None:
     """Print a compact experiment comparison table."""
 
@@ -600,6 +740,7 @@ def print_experiment_summary(results: list[ExperimentResult]) -> None:
                 "blocks": format_feature_blocks(result.feature_blocks),
                 "features": result.feature_count,
                 "epochs": result.epochs,
+                "device": result.device,
                 "persist_test_mae": round(result.persistence_test_mae, 2),
                 "model_test_mae": round(result.model_test_mae, 2),
                 "mae_delta": round(
@@ -688,6 +829,7 @@ def main() -> None:
 
     torch.manual_seed(RANDOM_SEED)
     args = parse_args()
+    device = resolve_device(args.device)
     frame = build_modeling_frame(args.database)
 
     if args.describe_targets:
@@ -707,7 +849,7 @@ def main() -> None:
 
         print(
             "Running experiments: "
-            f"{total_experiments} configs, epochs={args.epochs}",
+            f"{total_experiments} configs, epochs={args.epochs}, device={device.type}",
             flush=True,
         )
 
@@ -729,6 +871,7 @@ def main() -> None:
                     epochs=args.epochs,
                     learning_rate=args.learning_rate,
                     batch_size=args.batch_size,
+                    device=device,
                     report_progress=False,
                 )
                 results.append(result)
@@ -738,6 +881,7 @@ def main() -> None:
                     f"target={target_column} "
                     f"blocks={format_feature_blocks(feature_blocks)} "
                     f"done in {elapsed_seconds:.1f}s "
+                    f"device={result.device} "
                     f"test_mae={result.model_test_mae:.2f} "
                     f"test_r2={result.model_test_r2:.6f}",
                     flush=True,
@@ -761,8 +905,12 @@ def main() -> None:
         epochs=args.epochs,
         learning_rate=args.learning_rate,
         batch_size=args.batch_size,
+        device=device,
         report_progress=True,
     )
+    print()
+    print("Device:")
+    print(result.device)
     print()
     print("Feature blocks:")
     print(format_feature_blocks(feature_blocks))
