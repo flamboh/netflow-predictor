@@ -25,6 +25,7 @@ from src.modeling import SplitData
 from src.modeling import TargetStandardization
 from src.modeling import compute_standardization
 from src.modeling import compute_target_standardization
+from src.modeling import evaluate_baseline_family
 from src.modeling import evaluate_model
 from src.modeling import evaluate_persistence_baseline
 from src.modeling import filter_target_rows
@@ -115,6 +116,8 @@ def run_regression_experiment_once(
     train_split = to_split(train_frame, feature_columns, target_column)
     valid_split = to_split(valid_frame, feature_columns, target_column)
     test_split = to_split(test_frame, feature_columns, target_column)
+    baseline_valid_metrics = evaluate_baseline_family(valid_split, target_spec)
+    baseline_test_metrics = evaluate_baseline_family(test_split, target_spec)
     persistence_valid_metrics = evaluate_persistence_baseline(valid_split, target_spec)
     persistence_test_metrics = evaluate_persistence_baseline(test_split, target_spec)
     feature_stats = compute_standardization(train_split)
@@ -147,6 +150,10 @@ def run_regression_experiment_once(
         feature_count=len(feature_columns),
         epochs=epochs,
         device=device.type,
+        baseline_metrics={
+            "validation": baseline_valid_metrics,
+            "test": baseline_test_metrics,
+        },
         persistence_valid_mae=persistence_valid_metrics["mae"],
         persistence_valid_rmse=persistence_valid_metrics["rmse"],
         persistence_valid_r2=persistence_valid_metrics["r2"],
@@ -161,6 +168,24 @@ def run_regression_experiment_once(
         model_test_r2=test_metrics["r2"],
     )
     return result, valid_split, test_split, target_stats, model, feature_columns
+
+
+def get_best_baseline_name(
+    baseline_metrics: dict[str, dict[str, float]],
+    metric_name: str,
+    maximize: bool = False,
+) -> str:
+    """Return the best naive baseline for one metric."""
+
+    metric_values = {
+        name: metrics[metric_name]
+        for name, metrics in baseline_metrics.items()
+    }
+
+    if maximize:
+        return max(metric_values, key=metric_values.get)
+
+    return min(metric_values, key=metric_values.get)
 
 
 def run_regression_experiment(
@@ -230,6 +255,28 @@ def print_experiment_summary(results: list[ExperimentResult]) -> None:
     summary_rows = []
 
     for result in results:
+        best_valid_baseline = get_best_baseline_name(
+            result.baseline_metrics["validation"],
+            "mae",
+        )
+        best_test_baseline = get_best_baseline_name(
+            result.baseline_metrics["test"],
+            "mae",
+        )
+        best_test_r2_baseline = get_best_baseline_name(
+            result.baseline_metrics["test"],
+            "r2",
+            maximize=True,
+        )
+        best_valid_baseline_metrics = result.baseline_metrics["validation"][
+            best_valid_baseline
+        ]
+        best_test_baseline_metrics = result.baseline_metrics["test"][
+            best_test_baseline
+        ]
+        best_test_r2_metrics = result.baseline_metrics["test"][
+            best_test_r2_baseline
+        ]
         summary_rows.append(
             {
                 "target": result.target,
@@ -237,10 +284,18 @@ def print_experiment_summary(results: list[ExperimentResult]) -> None:
                 "features": result.feature_count,
                 "epochs": result.epochs,
                 "device": result.device,
+                "best_val_baseline": best_valid_baseline,
+                "best_test_baseline": best_test_baseline,
+                "best_test_r2_baseline": best_test_r2_baseline,
                 "persist_val_mae": round(result.persistence_valid_mae, 2),
+                "best_val_mae": round(best_valid_baseline_metrics["mae"], 2),
                 "model_val_mae": round(result.model_valid_mae, 2),
                 "val_mae_delta": round(
                     result.model_valid_mae - result.persistence_valid_mae,
+                    2,
+                ),
+                "vs_best_val_mae": round(
+                    result.model_valid_mae - best_valid_baseline_metrics["mae"],
                     2,
                 ),
                 "persist_val_r2": round(result.persistence_valid_r2, 6),
@@ -250,15 +305,25 @@ def print_experiment_summary(results: list[ExperimentResult]) -> None:
                     6,
                 ),
                 "persist_test_mae": round(result.persistence_test_mae, 2),
+                "best_test_mae": round(best_test_baseline_metrics["mae"], 2),
                 "model_test_mae": round(result.model_test_mae, 2),
                 "mae_delta": round(
                     result.model_test_mae - result.persistence_test_mae,
                     2,
                 ),
+                "vs_best_test_mae": round(
+                    result.model_test_mae - best_test_baseline_metrics["mae"],
+                    2,
+                ),
                 "persist_test_r2": round(result.persistence_test_r2, 6),
+                "best_test_r2": round(best_test_r2_metrics["r2"], 6),
                 "model_test_r2": round(result.model_test_r2, 6),
                 "r2_delta": round(
                     result.model_test_r2 - result.persistence_test_r2,
+                    6,
+                ),
+                "vs_best_test_r2": round(
+                    result.model_test_r2 - best_test_r2_metrics["r2"],
                     6,
                 ),
             }

@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import pandas as pd
 import torch
 
 from src.cli import format_feature_blocks
@@ -83,6 +84,22 @@ def main() -> None:
         f"'rmse': {result.persistence_test_rmse}, "
         f"'r2': {result.persistence_test_r2}}}"
     )
+    baseline_rows = []
+
+    for split_name, baseline_metrics in result.baseline_metrics.items():
+        for baseline_name, metric_values in baseline_metrics.items():
+            baseline_rows.append(
+                {
+                    "split": split_name,
+                    "baseline": baseline_name,
+                    "mae": round(metric_values["mae"], 2),
+                    "rmse": round(metric_values["rmse"], 2),
+                    "r2": round(metric_values["r2"], 6),
+                }
+            )
+    print()
+    print("Naive baseline comparison:")
+    print(pd.DataFrame(baseline_rows).to_string(index=False))
     print()
     print("Validation metrics:")
     print(f"target={args.target}")

@@ -56,6 +56,7 @@ class ExperimentResult:
     feature_count: int
     epochs: int
     device: str
+    baseline_metrics: dict[str, dict[str, dict[str, float]]]
     persistence_valid_mae: float
     persistence_valid_rmse: float
     persistence_valid_r2: float
@@ -358,6 +359,60 @@ def make_persistence_predictions(
     raise ValueError(f"Unsupported persistence baseline for {target_spec.task_kind}")
 
 
+def make_baseline_predictions(
+    frame: pd.DataFrame,
+    target_spec: TargetSpec,
+    baseline_name: str,
+) -> torch.Tensor:
+    """Build one named naive baseline for the selected target."""
+
+    base_column = target_spec.source_column
+    current_values = frame[base_column].astype("float32")
+    persistence_predictions = pd.Series(
+        make_persistence_predictions(frame, target_spec).numpy(),
+        index=frame.index,
+        dtype="float32",
+    )
+
+    if baseline_name == "persistence":
+        return torch.tensor(persistence_predictions.to_numpy(dtype="float32"))
+
+    if baseline_name == "moving_avg_3":
+        rolling_values = frame[f"{base_column}_rolling_mean_3"].astype("float32")
+        if target_spec.task_kind == "exact_count":
+            predictions = rolling_values
+        elif target_spec.task_kind == "delta":
+            predictions = rolling_values - current_values
+        else:
+            raise ValueError(f"Unsupported baseline for {target_spec.task_kind}")
+        predictions = predictions.fillna(persistence_predictions)
+        return torch.tensor(predictions.to_numpy(dtype="float32"))
+
+    if baseline_name == "moving_avg_12":
+        rolling_values = frame[f"{base_column}_rolling_mean_12"].astype("float32")
+        if target_spec.task_kind == "exact_count":
+            predictions = rolling_values
+        elif target_spec.task_kind == "delta":
+            predictions = rolling_values - current_values
+        else:
+            raise ValueError(f"Unsupported baseline for {target_spec.task_kind}")
+        predictions = predictions.fillna(persistence_predictions)
+        return torch.tensor(predictions.to_numpy(dtype="float32"))
+
+    if baseline_name == "lag_12":
+        lag_values = frame[f"{base_column}_lag_12"].astype("float32")
+        if target_spec.task_kind == "exact_count":
+            predictions = lag_values
+        elif target_spec.task_kind == "delta":
+            predictions = lag_values - current_values
+        else:
+            raise ValueError(f"Unsupported baseline for {target_spec.task_kind}")
+        predictions = predictions.fillna(persistence_predictions)
+        return torch.tensor(predictions.to_numpy(dtype="float32"))
+
+    raise ValueError(f"Unknown baseline: {baseline_name}")
+
+
 def evaluate_persistence_baseline(
     split: SplitData,
     target_spec: TargetSpec,
@@ -369,6 +424,34 @@ def evaluate_persistence_baseline(
         split.frame[split.target_column].to_numpy(dtype="float32")
     )
     return evaluate_predictions(predictions, actual_targets)
+
+
+def evaluate_baseline_family(
+    split: SplitData,
+    target_spec: TargetSpec,
+) -> dict[str, dict[str, float]]:
+    """Evaluate the default family of naive baselines on one split."""
+
+    baseline_names = (
+        "persistence",
+        "moving_avg_3",
+        "moving_avg_12",
+        "lag_12",
+    )
+    actual_targets = torch.tensor(
+        split.frame[split.target_column].to_numpy(dtype="float32")
+    )
+    metrics: dict[str, dict[str, float]] = {}
+
+    for baseline_name in baseline_names:
+        predictions = make_baseline_predictions(
+            split.frame,
+            target_spec,
+            baseline_name,
+        )
+        metrics[baseline_name] = evaluate_predictions(predictions, actual_targets)
+
+    return metrics
 
 
 def metrics_are_finite(metrics: dict[str, float]) -> bool:
