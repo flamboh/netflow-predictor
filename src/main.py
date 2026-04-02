@@ -9,6 +9,7 @@ from src.cli import parse_args
 from src.cli import parse_experiment_feature_blocks
 from src.cli import parse_experiment_targets
 from src.cli import parse_feature_blocks
+from src.cli import parse_permutation_groups
 from src.cli import parse_ranking_prefixes
 from src.experiments import build_modeling_frame
 from src.experiments import run_experiment_matrix
@@ -16,6 +17,7 @@ from src.experiments import run_regression_experiment
 from src.experiments import show_requested_prediction
 from src.experiments import show_test_examples
 from src.feature_analysis import filter_ranked_features
+from src.feature_analysis import get_grouped_permutation_importance
 from src.feature_analysis import get_linear_feature_ranking
 from src.modeling import RANDOM_SEED
 from src.modeling import resolve_device
@@ -50,7 +52,7 @@ def main() -> None:
         return
 
     feature_blocks = parse_feature_blocks(args.feature_blocks)
-    result, test_split, target_stats, model, feature_columns = run_regression_experiment(
+    result, valid_split, test_split, target_stats, model, feature_columns = run_regression_experiment(
         frame=frame,
         target_column=args.target,
         feature_blocks=feature_blocks,
@@ -113,6 +115,30 @@ def main() -> None:
             print("No features matched the requested ranking prefixes.")
         else:
             print(ranking.to_string(index=False))
+    if args.show_group_permutation_importance:
+        if args.permutation_split == "validation":
+            permutation_split = valid_split
+        elif args.permutation_split == "test":
+            permutation_split = test_split
+        else:
+            raise ValueError(
+                "Permutation split must be 'validation' or 'test'."
+            )
+        importance = get_grouped_permutation_importance(
+            model=model,
+            split=permutation_split,
+            target_stats=target_stats,
+            feature_columns=feature_columns,
+            groups=parse_permutation_groups(args.permutation_groups),
+            repeats=args.permutation_repeats,
+        )
+        print()
+        print("Grouped permutation importance:")
+        print(f"split={args.permutation_split}")
+        if importance.empty:
+            print("No groups matched the current feature set.")
+        else:
+            print(importance.to_string(index=False))
     show_test_examples(model, test_split, target_stats)
     show_requested_prediction(
         model,

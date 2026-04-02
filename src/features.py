@@ -29,10 +29,12 @@ FEATURE_BLOCK_NAMES = (
     "general",
     "context",
     "spectrum",
+    "spectrum_region_summary",
     "structure",
     "structure_summary",
     "structure_tau_samples",
     "structure_sd_samples",
+    "structure_region_summary",
 )
 
 
@@ -46,6 +48,19 @@ def structure_block_requested(feature_blocks: tuple[str, ...]) -> bool:
             "structure_summary",
             "structure_tau_samples",
             "structure_sd_samples",
+            "structure_region_summary",
+        )
+    )
+
+
+def spectrum_block_requested(feature_blocks: tuple[str, ...]) -> bool:
+    """Return whether any spectrum-derived block was requested."""
+
+    return any(
+        block in feature_blocks
+        for block in (
+            "spectrum",
+            "spectrum_region_summary",
         )
     )
 
@@ -77,6 +92,28 @@ def sample_values(values: list[float], sample_count: int = CURVE_SAMPLE_COUNT) -
         sampled.append(values[position])
 
     return sampled
+
+
+def compute_region_means(values: list[float]) -> dict[str, float]:
+    """Compute left/middle/right means over an ordered curve."""
+
+    left_end = max(1, len(values) // 3)
+    right_start = max(left_end + 1, (2 * len(values)) // 3)
+    left_values = values[:left_end]
+    middle_values = values[left_end:right_start]
+    right_values = values[right_start:]
+
+    if not middle_values:
+        middle_values = values[left_end - 1:left_end]
+
+    if not right_values:
+        right_values = values[-1:]
+
+    return {
+        "left": compute_mean(left_values),
+        "middle": compute_mean(middle_values),
+        "right": compute_mean(right_values),
+    }
 
 
 def ordered_unique(columns: Iterable[str]) -> list[str]:
@@ -221,6 +258,32 @@ def make_structure_sd_sample_feature_names(
     return [f"structure_sd_sample_{index}" for index in range(sample_count)]
 
 
+def make_structure_region_summary_feature_names() -> list[str]:
+    """List region-summary structure feature names."""
+
+    return [
+        "structure_tau_left_mean",
+        "structure_tau_middle_mean",
+        "structure_tau_right_mean",
+        "structure_sd_left_mean",
+        "structure_sd_middle_mean",
+        "structure_sd_right_mean",
+    ]
+
+
+def make_spectrum_region_summary_feature_names() -> list[str]:
+    """List region-summary spectrum feature names."""
+
+    return [
+        "spectrum_alpha_left_mean",
+        "spectrum_alpha_middle_mean",
+        "spectrum_alpha_right_mean",
+        "spectrum_f_left_mean",
+        "spectrum_f_middle_mean",
+        "spectrum_f_right_mean",
+    ]
+
+
 def summarize_spectrum_curve(curve_json: str) -> pd.Series:
     """Convert one spectrum JSON blob into compact numeric features."""
 
@@ -247,6 +310,14 @@ def summarize_spectrum_curve(curve_json: str) -> pd.Series:
         "spectrum_alpha_at_f_max": alphas[f_max_index],
         "spectrum_area": area,
     }
+    alpha_regions = compute_region_means(alphas)
+    f_regions = compute_region_means(f_values)
+    values["spectrum_alpha_left_mean"] = alpha_regions["left"]
+    values["spectrum_alpha_middle_mean"] = alpha_regions["middle"]
+    values["spectrum_alpha_right_mean"] = alpha_regions["right"]
+    values["spectrum_f_left_mean"] = f_regions["left"]
+    values["spectrum_f_middle_mean"] = f_regions["middle"]
+    values["spectrum_f_right_mean"] = f_regions["right"]
 
     for index, value in enumerate(sample_values(alphas)):
         values[f"spectrum_alpha_sample_{index}"] = value
@@ -273,6 +344,14 @@ def summarize_structure_curve(curve_json: str) -> pd.Series:
         "structure_sd_mean": compute_mean(sd_values),
         "structure_sd_std": compute_std(sd_values),
     }
+    tau_regions = compute_region_means(tau_values)
+    sd_regions = compute_region_means(sd_values)
+    values["structure_tau_left_mean"] = tau_regions["left"]
+    values["structure_tau_middle_mean"] = tau_regions["middle"]
+    values["structure_tau_right_mean"] = tau_regions["right"]
+    values["structure_sd_left_mean"] = sd_regions["left"]
+    values["structure_sd_middle_mean"] = sd_regions["middle"]
+    values["structure_sd_right_mean"] = sd_regions["right"]
 
     for index, value in enumerate(sample_values(tau_values)):
         values[f"structure_tau_sample_{index}"] = value
@@ -333,7 +412,10 @@ def add_spectrum_features(
 
     enriched = frame.copy()
     derived = enriched[spectrum_column].apply(summarize_spectrum_curve)
-    for column in make_spectrum_feature_names():
+    for column in (
+        make_spectrum_feature_names()
+        + make_spectrum_region_summary_feature_names()
+    ):
         enriched[column] = derived[column]
     return enriched
 
@@ -357,7 +439,10 @@ def add_structure_features(
 
     enriched = frame.copy()
     derived = enriched[structure_column].apply(summarize_structure_curve)
-    for column in make_structure_feature_names():
+    for column in (
+        make_structure_feature_names()
+        + make_structure_region_summary_feature_names()
+    ):
         enriched[column] = derived[column]
     return enriched
 
@@ -390,6 +475,9 @@ def choose_feature_columns(
     if "spectrum" in feature_blocks:
         feature_columns.extend(make_spectrum_feature_names())
 
+    if "spectrum_region_summary" in feature_blocks:
+        feature_columns.extend(make_spectrum_region_summary_feature_names())
+
     if "structure" in feature_blocks:
         feature_columns.extend(make_structure_feature_names())
     else:
@@ -401,6 +489,9 @@ def choose_feature_columns(
 
         if "structure_sd_samples" in feature_blocks:
             feature_columns.extend(make_structure_sd_sample_feature_names())
+
+        if "structure_region_summary" in feature_blocks:
+            feature_columns.extend(make_structure_region_summary_feature_names())
 
     if "general" in feature_blocks:
         router_columns = sorted(

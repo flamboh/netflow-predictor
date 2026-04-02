@@ -77,14 +77,20 @@ def parse_args() -> argparse.Namespace:
         default="target,general",
         help=(
             "Comma-separated feature blocks. "
-            "Available: target,general,context,spectrum,structure,"
-            "structure_summary,structure_tau_samples,structure_sd_samples."
+            "Available: target,general,context,spectrum,spectrum_region_summary,"
+            "structure,structure_summary,structure_tau_samples,"
+            "structure_sd_samples,structure_region_summary."
         ),
     )
     parser.add_argument(
         "--show-feature-ranking",
         action="store_true",
         help="Print ranked learned feature weights after a single run.",
+    )
+    parser.add_argument(
+        "--show-group-permutation-importance",
+        action="store_true",
+        help="Print grouped permutation importance after a single run.",
     )
     parser.add_argument(
         "--ranking-prefixes",
@@ -99,6 +105,24 @@ def parse_args() -> argparse.Namespace:
         help="Number of ranked features to print.",
     )
     parser.add_argument(
+        "--permutation-groups",
+        type=str,
+        default="structure_summary,structure_tau_samples,structure_sd_samples",
+        help="Comma-separated feature groups for permutation importance.",
+    )
+    parser.add_argument(
+        "--permutation-split",
+        type=str,
+        default="validation",
+        help="Held-out split for permutation importance: validation or test.",
+    )
+    parser.add_argument(
+        "--permutation-repeats",
+        type=int,
+        default=3,
+        help="Number of grouped permutation repeats.",
+    )
+    parser.add_argument(
         "--run-experiments",
         action="store_true",
         help="Run a matrix of target/block experiments and print a summary table.",
@@ -106,12 +130,7 @@ def parse_args() -> argparse.Namespace:
     parser.add_argument(
         "--experiment-targets",
         type=str,
-        default=(
-            "next_sa_ipv4_count;"
-            "next_da_ipv4_count;"
-            "next_sa_ipv4_count_delta;"
-            "next_da_ipv4_count_delta"
-        ),
+        default="next_sa_ipv4_count_delta",
         help="Semicolon-separated regression targets for experiment mode.",
     )
     parser.add_argument(
@@ -119,11 +138,15 @@ def parse_args() -> argparse.Namespace:
         type=str,
         default=(
             "target,general;"
+            "target,general,spectrum;"
+            "target,general,spectrum_region_summary;"
+            "target,general,structure_region_summary;"
             "target,general,structure_summary;"
             "target,general,structure_tau_samples;"
             "target,general,structure_sd_samples;"
             "target,general,structure_summary,structure_tau_samples;"
-            "target,general,structure_summary,structure_sd_samples"
+            "target,general,structure_summary,structure_sd_samples;"
+            "target,general,structure"
         ),
         help="Semicolon-separated feature-block configs for experiment mode.",
     )
@@ -186,5 +209,11 @@ def format_feature_blocks(feature_blocks: tuple[str, ...]) -> str:
 
 def parse_ranking_prefixes(raw_value: str) -> list[str]:
     """Parse comma-separated feature prefixes for ranking output."""
+
+    return [value.strip() for value in raw_value.split(",") if value.strip()]
+
+
+def parse_permutation_groups(raw_value: str) -> list[str]:
+    """Parse comma-separated feature groups for permutation importance."""
 
     return [value.strip() for value in raw_value.split(",") if value.strip()]

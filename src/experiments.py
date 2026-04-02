@@ -16,6 +16,7 @@ from src.features import add_structure_features
 from src.features import add_target_family_features
 from src.features import choose_feature_columns
 from src.features import filter_feature_rows
+from src.features import spectrum_block_requested
 from src.features import structure_block_requested
 from src.modeling import ExperimentResult
 from src.modeling import LinearRegressionModel
@@ -60,7 +61,7 @@ def prepare_experiment_frame(
 
     experiment_frame = add_target_family_features(frame, target_spec.source_column)
 
-    if "spectrum" in feature_blocks:
+    if spectrum_block_requested(feature_blocks):
         experiment_frame = add_spectrum_features(
             experiment_frame,
             target_spec.source_column,
@@ -91,7 +92,14 @@ def run_regression_experiment_once(
     batch_size: int,
     device: torch.device,
     report_progress: bool,
-) -> tuple[ExperimentResult, SplitData, TargetStandardization, nn.Module, list[str]]:
+) -> tuple[
+    ExperimentResult,
+    SplitData,
+    SplitData,
+    TargetStandardization,
+    nn.Module,
+    list[str],
+]:
     """Run one regression experiment on one device."""
 
     validate_target_column(frame, target_column)
@@ -152,7 +160,7 @@ def run_regression_experiment_once(
         model_test_rmse=test_metrics["rmse"],
         model_test_r2=test_metrics["r2"],
     )
-    return result, test_split, target_stats, model, feature_columns
+    return result, valid_split, test_split, target_stats, model, feature_columns
 
 
 def run_regression_experiment(
@@ -164,10 +172,17 @@ def run_regression_experiment(
     batch_size: int,
     device: torch.device,
     report_progress: bool,
-) -> tuple[ExperimentResult, SplitData, TargetStandardization, nn.Module, list[str]]:
+) -> tuple[
+    ExperimentResult,
+    SplitData,
+    SplitData,
+    TargetStandardization,
+    nn.Module,
+    list[str],
+]:
     """Run one regression experiment and retry on CPU if MPS goes non-finite."""
 
-    result, test_split, target_stats, model, feature_columns = run_regression_experiment_once(
+    result, valid_split, test_split, target_stats, model, feature_columns = run_regression_experiment_once(
         frame=frame,
         target_column=target_column,
         feature_blocks=feature_blocks,
@@ -190,7 +205,7 @@ def run_regression_experiment(
     )
 
     if device.type != "mps" or model_metrics_are_finite:
-        return result, test_split, target_stats, model, feature_columns
+        return result, valid_split, test_split, target_stats, model, feature_columns
 
     print(
         "Warning: non-finite metrics on MPS; retrying on CPU "
@@ -285,7 +300,7 @@ def run_experiment_matrix(
                 "starting",
                 flush=True,
             )
-            result, _, _, _, _ = run_regression_experiment(
+            result, _, _, _, _, _ = run_regression_experiment(
                 frame=frame,
                 target_column=target_column,
                 feature_blocks=feature_blocks,
