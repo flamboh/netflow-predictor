@@ -5,6 +5,7 @@ from __future__ import annotations
 import argparse
 from dataclasses import dataclass
 from pathlib import Path
+import time
 
 import pandas as pd
 import torch
@@ -229,6 +230,12 @@ def parse_experiment_feature_blocks(raw_value: str) -> list[tuple[str, ...]]:
         return [DEFAULT_FEATURE_BLOCKS]
 
     return block_configs
+
+
+def format_feature_blocks(feature_blocks: tuple[str, ...]) -> str:
+    """Format a block tuple for logs and tables."""
+
+    return ",".join(feature_blocks)
 
 
 def split_by_time(frame: pd.DataFrame) -> tuple[pd.DataFrame, pd.DataFrame, pd.DataFrame]:
@@ -590,7 +597,7 @@ def print_experiment_summary(results: list[ExperimentResult]) -> None:
         summary_rows.append(
             {
                 "target": result.target,
-                "blocks": ",".join(result.feature_blocks),
+                "blocks": format_feature_blocks(result.feature_blocks),
                 "features": result.feature_count,
                 "epochs": result.epochs,
                 "persist_test_mae": round(result.persistence_test_mae, 2),
@@ -694,9 +701,27 @@ def main() -> None:
             args.experiment_feature_blocks
         )
         results: list[ExperimentResult] = []
+        total_experiments = len(targets) * len(block_configs)
+        completed_experiments = 0
+        overall_start = time.perf_counter()
+
+        print(
+            "Running experiments: "
+            f"{total_experiments} configs, epochs={args.epochs}",
+            flush=True,
+        )
 
         for target_column in targets:
             for feature_blocks in block_configs:
+                completed_experiments += 1
+                experiment_start = time.perf_counter()
+                print(
+                    f"[{completed_experiments}/{total_experiments}] "
+                    f"target={target_column} "
+                    f"blocks={format_feature_blocks(feature_blocks)} "
+                    "starting",
+                    flush=True,
+                )
                 result, _, _, _ = run_regression_experiment(
                     frame=frame,
                     target_column=target_column,
@@ -707,7 +732,24 @@ def main() -> None:
                     report_progress=False,
                 )
                 results.append(result)
+                elapsed_seconds = time.perf_counter() - experiment_start
+                print(
+                    f"[{completed_experiments}/{total_experiments}] "
+                    f"target={target_column} "
+                    f"blocks={format_feature_blocks(feature_blocks)} "
+                    f"done in {elapsed_seconds:.1f}s "
+                    f"test_mae={result.model_test_mae:.2f} "
+                    f"test_r2={result.model_test_r2:.6f}",
+                    flush=True,
+                )
 
+        total_elapsed_seconds = time.perf_counter() - overall_start
+        print(
+            f"Completed {total_experiments} experiments "
+            f"in {total_elapsed_seconds:.1f}s",
+            flush=True,
+        )
+        print()
         print_experiment_summary(results)
         return
 
@@ -723,7 +765,7 @@ def main() -> None:
     )
     print()
     print("Feature blocks:")
-    print(",".join(feature_blocks))
+    print(format_feature_blocks(feature_blocks))
     print()
     print("Persistence baseline metrics:")
     print(f"target={args.target}")
