@@ -15,6 +15,8 @@ from torch.utils.data import DataLoader
 from torch.utils.data import TensorDataset
 
 from src.data import build_feature_frame
+from src.feature_analysis import filter_ranked_features
+from src.feature_analysis import get_linear_feature_ranking
 from src.features import FEATURE_BLOCK_NAMES
 from src.features import add_spectrum_features
 from src.features import add_structure_features
@@ -166,6 +168,23 @@ def parse_args() -> argparse.Namespace:
         ),
     )
     parser.add_argument(
+        "--show-feature-ranking",
+        action="store_true",
+        help="Print ranked learned feature weights after a single run.",
+    )
+    parser.add_argument(
+        "--ranking-prefixes",
+        type=str,
+        default="",
+        help="Comma-separated feature prefixes to keep in the ranking output.",
+    )
+    parser.add_argument(
+        "--ranking-top-k",
+        type=int,
+        default=20,
+        help="Number of ranked features to print.",
+    )
+    parser.add_argument(
         "--run-experiments",
         action="store_true",
         help="Run a matrix of target/block experiments and print a summary table.",
@@ -250,6 +269,13 @@ def format_feature_blocks(feature_blocks: tuple[str, ...]) -> str:
     """Format a block tuple for logs and tables."""
 
     return ",".join(feature_blocks)
+
+
+def parse_ranking_prefixes(raw_value: str) -> list[str]:
+    """Parse comma-separated feature prefixes for ranking output."""
+
+    prefixes = [value.strip() for value in raw_value.split(",") if value.strip()]
+    return prefixes
 
 
 def resolve_device(requested_device: str) -> torch.device:
@@ -615,7 +641,7 @@ def run_regression_experiment_once(
     batch_size: int,
     device: torch.device,
     report_progress: bool,
-) -> tuple[ExperimentResult, SplitData, TargetStandardization, nn.Module]:
+) -> tuple[ExperimentResult, SplitData, TargetStandardization, nn.Module, list[str]]:
     """Run one regression experiment on one device."""
 
     validate_target_column(frame, target_column)
@@ -677,7 +703,7 @@ def run_regression_experiment_once(
         model_test_rmse=test_metrics["rmse"],
         model_test_r2=test_metrics["r2"],
     )
-    return result, test_split, target_stats, model
+    return result, test_split, target_stats, model, feature_columns
 
 
 def run_regression_experiment(
@@ -689,10 +715,10 @@ def run_regression_experiment(
     batch_size: int,
     device: torch.device,
     report_progress: bool,
-) -> tuple[ExperimentResult, SplitData, TargetStandardization, nn.Module]:
+) -> tuple[ExperimentResult, SplitData, TargetStandardization, nn.Module, list[str]]:
     """Run one regression experiment and retry on CPU if MPS goes non-finite."""
 
-    result, test_split, target_stats, model = run_regression_experiment_once(
+    result, test_split, target_stats, model, feature_columns = run_regression_experiment_once(
         frame=frame,
         target_column=target_column,
         feature_blocks=feature_blocks,
@@ -715,7 +741,7 @@ def run_regression_experiment(
     )
 
     if device.type != "mps" or model_metrics_are_finite:
-        return result, test_split, target_stats, model
+        return result, test_split, target_stats, model, feature_columns
 
     print(
         "Warning: non-finite metrics on MPS; retrying on CPU "
@@ -882,7 +908,7 @@ def main() -> None:
                     "starting",
                     flush=True,
                 )
-                result, _, _, _ = run_regression_experiment(
+                result, _, _, _, _ = run_regression_experiment(
                     frame=frame,
                     target_column=target_column,
                     feature_blocks=feature_blocks,
@@ -916,7 +942,7 @@ def main() -> None:
         return
 
     feature_blocks = parse_feature_blocks(args.feature_blocks)
-    result, test_split, target_stats, model = run_regression_experiment(
+    result, test_split, target_stats, model, feature_columns = run_regression_experiment(
         frame=frame,
         target_column=args.target,
         feature_blocks=feature_blocks,
@@ -966,6 +992,19 @@ def main() -> None:
             "r2": result.model_test_r2,
         }
     )
+    if args.show_feature_ranking:
+        ranking = get_linear_feature_ranking(model, feature_columns)
+        ranking = filter_ranked_features(
+            ranking,
+            parse_ranking_prefixes(args.ranking_prefixes),
+        )
+        ranking = ranking.head(args.ranking_top_k)
+        print()
+        print("Feature ranking:")
+        if ranking.empty:
+            print("No features matched the requested ranking prefixes.")
+        else:
+            print(ranking.to_string(index=False))
     show_test_examples(model, test_split, target_stats)
     show_requested_prediction(
         model,
