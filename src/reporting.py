@@ -31,6 +31,17 @@ def get_best_baseline_name(
     return min(metric_values, key=metric_values.get)
 
 
+def format_baseline_name(baseline_name: str) -> str:
+    """Shorten baseline labels for compact tables."""
+
+    return {
+        "persistence": "persist",
+        "moving_avg_3": "ma3",
+        "moving_avg_12": "ma12",
+        "lag_12": "lag12",
+    }[baseline_name]
+
+
 def print_experiment_summary(results: list[ExperimentResult]) -> None:
     """Print a compact experiment comparison table."""
 
@@ -64,48 +75,23 @@ def print_experiment_summary(results: list[ExperimentResult]) -> None:
                 "target": result.target,
                 "model": result.model_backend,
                 "blocks": format_feature_blocks(result.feature_blocks),
-                "features": result.feature_count,
-                "epochs": result.epochs,
-                "device": result.device,
-                "best_val_baseline": best_valid_baseline,
-                "best_test_baseline": best_test_baseline,
-                "best_test_r2_baseline": best_test_r2_baseline,
-                "persist_val_mae": round(result.persistence_valid_mae, 2),
-                "best_val_mae": round(best_valid_baseline_metrics["mae"], 2),
-                "model_val_mae": round(result.model_valid_mae, 2),
-                "val_mae_delta": round(
-                    result.model_valid_mae - result.persistence_valid_mae,
-                    2,
-                ),
-                "vs_best_val_mae": round(
+                "feats": result.feature_count,
+                "ep": result.epochs,
+                "dev": result.device,
+                "base_mae": format_baseline_name(best_test_baseline),
+                "base_r2": format_baseline_name(best_test_r2_baseline),
+                "val_mae": round(result.model_valid_mae, 2),
+                "val_vs_base": round(
                     result.model_valid_mae - best_valid_baseline_metrics["mae"],
                     2,
                 ),
-                "persist_val_r2": round(result.persistence_valid_r2, 6),
-                "model_val_r2": round(result.model_valid_r2, 6),
-                "val_r2_delta": round(
-                    result.model_valid_r2 - result.persistence_valid_r2,
-                    6,
-                ),
-                "persist_test_mae": round(result.persistence_test_mae, 2),
-                "best_test_mae": round(best_test_baseline_metrics["mae"], 2),
-                "model_test_mae": round(result.model_test_mae, 2),
-                "mae_delta": round(
-                    result.model_test_mae - result.persistence_test_mae,
-                    2,
-                ),
-                "vs_best_test_mae": round(
+                "test_mae": round(result.model_test_mae, 2),
+                "test_vs_base": round(
                     result.model_test_mae - best_test_baseline_metrics["mae"],
                     2,
                 ),
-                "persist_test_r2": round(result.persistence_test_r2, 6),
-                "best_test_r2": round(best_test_r2_metrics["r2"], 6),
-                "model_test_r2": round(result.model_test_r2, 6),
-                "r2_delta": round(
-                    result.model_test_r2 - result.persistence_test_r2,
-                    6,
-                ),
-                "vs_best_test_r2": round(
+                "test_r2": round(result.model_test_r2, 6),
+                "r2_vs_base": round(
                     result.model_test_r2 - best_test_r2_metrics["r2"],
                     6,
                 ),
