@@ -13,8 +13,12 @@ from torch.utils.data import DataLoader
 from torch.utils.data import TensorDataset
 
 from src.data import build_feature_frame
+from src.features import add_target_family_features
+from src.features import choose_feature_columns
+from src.features import filter_feature_rows
 from src.targets import add_next_window_targets
 from src.targets import describe_targets
+from src.targets import get_target_spec
 
 
 TRAIN_RATIO = 0.70
@@ -117,37 +121,6 @@ def parse_args() -> argparse.Namespace:
     return args
 
 
-def choose_feature_columns(frame: pd.DataFrame) -> list[str]:
-    """List feature columns in one explicit place."""
-
-    feature_columns = [
-        "flows",
-        "packets",
-        "flows_tcp",
-        "flows_udp",
-        "sa_ipv4_count",
-        "da_ipv4_count",
-        "sa_ipv6_count",
-        "da_ipv6_count",
-        "unique_protocols_count_ipv4",
-        "unique_protocols_count_ipv6",
-        "hour_of_day",
-        "day_of_week",
-        "bytes_lag_1",
-        "bytes_lag_12",
-        "packets_lag_1",
-        "flows_lag_1",
-    ]
-
-    router_columns = sorted(
-        column
-        for column in frame.columns
-        if column.startswith("router_") and column != "router_name"
-    )
-    feature_columns.extend(router_columns)
-    return feature_columns
-
-
 def split_by_time(frame: pd.DataFrame) -> tuple[pd.DataFrame, pd.DataFrame, pd.DataFrame]:
     """Split the dataset chronologically using unique timestamps."""
 
@@ -166,10 +139,7 @@ def split_by_time(frame: pd.DataFrame) -> tuple[pd.DataFrame, pd.DataFrame, pd.D
 def validate_target_column(frame: pd.DataFrame, target_column: str) -> None:
     """Fail early if the requested target column is missing."""
 
-    if target_column in frame.columns:
-        return
-
-    raise ValueError(f"Unknown target column: {target_column}")
+    get_target_spec(target_column)
 
 
 def filter_target_rows(frame: pd.DataFrame, target_column: str) -> pd.DataFrame:
@@ -419,8 +389,11 @@ def main() -> None:
         print(target_summary.to_string(index=False))
         return
 
+    target_spec = get_target_spec(args.target)
+    frame = add_target_family_features(frame, target_spec.source_column)
+    feature_columns = choose_feature_columns(frame, target_spec.source_column)
+    frame = filter_feature_rows(frame, feature_columns)
     frame = filter_target_rows(frame, args.target)
-    feature_columns = choose_feature_columns(frame)
     train_frame, valid_frame, test_frame = split_by_time(frame)
     train_split = to_split(train_frame, feature_columns, args.target)
     valid_split = to_split(valid_frame, feature_columns, args.target)

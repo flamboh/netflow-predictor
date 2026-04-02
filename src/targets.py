@@ -84,6 +84,16 @@ def list_target_specs() -> list[TargetSpec]:
     return specs
 
 
+def get_target_spec(target_name: str) -> TargetSpec:
+    """Look up one supported target."""
+
+    for spec in list_target_specs():
+        if spec.name == target_name:
+            return spec
+
+    raise ValueError(f"Unknown target column: {target_name}")
+
+
 def describe_targets(frame: pd.DataFrame) -> pd.DataFrame:
     """Summarize supported targets after target construction."""
 

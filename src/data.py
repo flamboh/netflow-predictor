@@ -117,26 +117,11 @@ def add_router_features(frame: pd.DataFrame) -> pd.DataFrame:
     return encoded
 
 
-def add_lag_features(frame: pd.DataFrame) -> pd.DataFrame:
-    """Add a few previous-trace features for each router."""
-
-    enriched = frame.sort_values(["router", "timestamp"]).copy()
-    router_groups = enriched.groupby("router")
-    enriched["bytes_lag_1"] = router_groups["bytes"].shift(1)
-    enriched["bytes_lag_12"] = router_groups["bytes"].shift(12)
-    enriched["packets_lag_1"] = router_groups["packets"].shift(1)
-    enriched["flows_lag_1"] = router_groups["flows"].shift(1)
-    lag_columns = ["bytes_lag_1", "bytes_lag_12", "packets_lag_1", "flows_lag_1"]
-    enriched = enriched.dropna(subset=lag_columns).reset_index(drop=True)
-    return enriched
-
-
 def build_feature_frame(database_path: Path) -> pd.DataFrame:
     """Build the final modeling frame."""
 
     frame = load_base_frame(database_path)
     frame = validate_join_features(frame)
     frame = add_time_features(frame)
-    frame = add_lag_features(frame)
     frame = add_router_features(frame)
     return frame
