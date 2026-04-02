@@ -15,13 +15,13 @@ from src.cli import parse_ranking_prefixes
 from src.experiments import build_modeling_frame
 from src.experiments import run_experiment_matrix
 from src.experiments import run_regression_experiment
-from src.experiments import show_requested_prediction
-from src.experiments import show_test_examples
 from src.feature_analysis import filter_ranked_features
 from src.feature_analysis import get_grouped_permutation_importance
-from src.feature_analysis import get_linear_feature_ranking
+from src.feature_analysis import get_model_feature_ranking
 from src.modeling import RANDOM_SEED
 from src.modeling import resolve_device
+from src.reporting import show_requested_prediction
+from src.reporting import show_test_examples
 from src.targets import describe_targets
 
 
@@ -45,6 +45,7 @@ def main() -> None:
             block_configs=parse_experiment_feature_blocks(
                 args.experiment_feature_blocks
             ),
+            model_backend=args.model_backend,
             epochs=args.epochs,
             learning_rate=args.learning_rate,
             batch_size=args.batch_size,
@@ -56,6 +57,7 @@ def main() -> None:
     result, valid_split, test_split, target_stats, model, feature_columns = run_regression_experiment(
         frame=frame,
         target_column=args.target,
+        model_backend=args.model_backend,
         feature_blocks=feature_blocks,
         epochs=args.epochs,
         learning_rate=args.learning_rate,
@@ -63,6 +65,9 @@ def main() -> None:
         device=device,
         report_progress=True,
     )
+    print()
+    print("Model backend:")
+    print(result.model_backend)
     print()
     print("Device:")
     print(result.device)
@@ -120,7 +125,7 @@ def main() -> None:
         }
     )
     if args.show_feature_ranking:
-        ranking = get_linear_feature_ranking(model, feature_columns)
+        ranking = get_model_feature_ranking(model, feature_columns)
         ranking = filter_ranked_features(
             ranking,
             parse_ranking_prefixes(args.ranking_prefixes),

@@ -7,9 +7,6 @@ import math
 
 import pandas as pd
 import torch
-from torch import nn
-from torch.utils.data import DataLoader
-from torch.utils.data import TensorDataset
 
 from src.targets import TargetSpec
 from src.targets import get_target_spec
@@ -52,6 +49,7 @@ class ExperimentResult:
 
     target: str
     task_kind: str
+    model_backend: str
     feature_blocks: tuple[str, ...]
     feature_count: int
     epochs: int
@@ -69,18 +67,6 @@ class ExperimentResult:
     model_test_mae: float
     model_test_rmse: float
     model_test_r2: float
-
-
-class LinearRegressionModel(nn.Module):
-    """A single linear layer for regression."""
-
-    def __init__(self, feature_count: int) -> None:
-        super().__init__()
-        self.linear = nn.Linear(feature_count, 1)
-
-    def forward(self, features: torch.Tensor) -> torch.Tensor:
-        predictions = self.linear(features)
-        return predictions.squeeze(1)
 
 
 def resolve_device(requested_device: str) -> torch.device:
@@ -113,24 +99,6 @@ def resolve_device(requested_device: str) -> torch.device:
         return torch.device("cpu")
 
     raise ValueError(f"Unknown device: {requested_device}")
-
-
-def move_target_stats(
-    stats: TargetStandardization,
-    device: torch.device,
-) -> TargetStandardization:
-    """Move target scaling tensors onto the selected device."""
-
-    return TargetStandardization(
-        mean=stats.mean.to(device),
-        std=stats.std.to(device),
-    )
-
-
-def get_model_device(model: nn.Module) -> torch.device:
-    """Return the device used by the model parameters."""
-
-    return next(model.parameters()).device
 
 
 def split_by_time(frame: pd.DataFrame) -> tuple[pd.DataFrame, pd.DataFrame, pd.DataFrame]:
@@ -232,86 +200,6 @@ def standardize_targets(
     )
 
 
-def make_loader(
-    split: SplitData,
-    batch_size: int,
-    shuffle: bool,
-    device: torch.device,
-) -> DataLoader:
-    """Create a DataLoader for one split."""
-
-    generator = torch.Generator()
-    generator.manual_seed(RANDOM_SEED)
-    dataset = TensorDataset(split.features, split.targets)
-    return DataLoader(
-        dataset,
-        batch_size=batch_size,
-        shuffle=shuffle,
-        generator=generator,
-        pin_memory=device.type == "cuda",
-    )
-
-
-def train_model(
-    model: nn.Module,
-    train_loader: DataLoader,
-    valid_split: SplitData,
-    target_stats: TargetStandardization,
-    epochs: int,
-    learning_rate: float,
-    report_progress: bool = True,
-) -> None:
-    """Fit the linear regression model."""
-
-    device = get_model_device(model)
-    optimizer = torch.optim.Adam(model.parameters(), lr=learning_rate)
-    loss_fn = nn.MSELoss()
-
-    for epoch in range(epochs):
-        model.train()
-
-        for feature_batch, target_batch in train_loader:
-            feature_batch = feature_batch.to(device, non_blocking=True)
-            target_batch = target_batch.to(device, non_blocking=True)
-            optimizer.zero_grad()
-            predictions = model(feature_batch)
-            loss = loss_fn(predictions, target_batch)
-            loss.backward()
-            optimizer.step()
-
-        if report_progress and ((epoch + 1) % 25 == 0 or epoch == 0):
-            valid_metrics = evaluate_model(model, valid_split, target_stats)
-            print(
-                f"epoch={epoch + 1} "
-                f"valid_mae={valid_metrics['mae']:.2f} "
-                f"valid_rmse={valid_metrics['rmse']:.2f} "
-                f"valid_r2={valid_metrics['r2']:.4f}"
-            )
-
-
-def predict_scaled(model: nn.Module, split: SplitData) -> torch.Tensor:
-    """Run the model and return standardized predictions."""
-
-    device = get_model_device(model)
-    model.eval()
-
-    with torch.no_grad():
-        features = split.features.to(device)
-        return model(features)
-
-
-def predict(
-    model: nn.Module,
-    split: SplitData,
-    target_stats: TargetStandardization,
-) -> torch.Tensor:
-    """Run the model and return predictions on the original target scale."""
-
-    device = get_model_device(model)
-    scaled_predictions = predict_scaled(model, split)
-    return scaled_predictions * target_stats.std.to(device) + target_stats.mean.to(device)
-
-
 def evaluate_predictions(
     predictions: torch.Tensor,
     actual_targets: torch.Tensor,
@@ -326,21 +214,6 @@ def evaluate_predictions(
     residual_sum_of_squares = residuals.square().sum()
     r2 = 1.0 - (residual_sum_of_squares / total_sum_of_squares).item()
     return {"mae": mae, "rmse": rmse, "r2": r2}
-
-
-def evaluate_model(
-    model: nn.Module,
-    split: SplitData,
-    target_stats: TargetStandardization,
-) -> dict[str, float]:
-    """Evaluate the learned model on one split."""
-
-    predictions = predict(model, split, target_stats)
-    actual_targets = torch.tensor(
-        split.frame[split.target_column].to_numpy(dtype="float32"),
-        device=predictions.device,
-    )
-    return evaluate_predictions(predictions, actual_targets)
 
 
 def make_persistence_predictions(

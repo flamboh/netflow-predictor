@@ -1,4 +1,4 @@
-"""Helpers for inspecting learned linear feature weights."""
+"""Helpers for inspecting learned feature weights and grouped importance."""
 
 from __future__ import annotations
 
@@ -6,7 +6,7 @@ from collections.abc import Sequence
 
 import pandas as pd
 import torch
-from torch import nn
+from xgboost import XGBRegressor
 
 from src.features import make_spectrum_region_summary_feature_names
 from src.features import make_structure_region_summary_feature_names
@@ -16,7 +16,8 @@ from src.features import make_structure_tau_sample_feature_names
 from src.modeling import SplitData
 from src.modeling import TargetStandardization
 from src.modeling import evaluate_predictions
-from src.modeling import predict
+from src.regressors import get_feature_ranking
+from src.regressors import predict_regressor
 
 
 def infer_feature_group(feature_name: str) -> str:
@@ -55,35 +56,6 @@ def infer_feature_group(feature_name: str) -> str:
     return "base"
 
 
-def get_linear_feature_ranking(
-    model: nn.Module,
-    feature_columns: Sequence[str],
-) -> pd.DataFrame:
-    """Build a sorted feature-weight table for the learned linear model."""
-
-    if not hasattr(model, "linear"):
-        raise ValueError("Expected a model with a .linear layer.")
-
-    weights = model.linear.weight.detach().cpu().flatten().tolist()
-
-    if len(weights) != len(feature_columns):
-        raise ValueError("Feature column count does not match learned weights.")
-
-    frame = pd.DataFrame(
-        {
-            "feature": list(feature_columns),
-            "coefficient": weights,
-        }
-    )
-    frame["abs_coefficient"] = frame["coefficient"].abs()
-    frame["group"] = frame["feature"].map(infer_feature_group)
-    frame = frame.sort_values(
-        ["abs_coefficient", "feature"],
-        ascending=[False, True],
-    ).reset_index(drop=True)
-    return frame
-
-
 def filter_ranked_features(
     ranking: pd.DataFrame,
     prefixes: Sequence[str],
@@ -103,7 +75,7 @@ def filter_ranked_features(
 
 
 def get_grouped_permutation_importance(
-    model: nn.Module,
+    model: torch.nn.Module | XGBRegressor,
     split: SplitData,
     target_stats: TargetStandardization,
     feature_columns: Sequence[str],
@@ -116,11 +88,11 @@ def get_grouped_permutation_importance(
     if repeats < 1:
         raise ValueError("Permutation repeats must be at least 1.")
 
-    ranking = get_linear_feature_ranking(model, feature_columns)
+    ranking = get_feature_ranking(model, feature_columns, infer_feature_group)
     actual_targets = torch.tensor(
         split.frame[split.target_column].to_numpy(dtype="float32")
     )
-    baseline_predictions = predict(model, split, target_stats).detach().cpu()
+    baseline_predictions = predict_regressor(model, split, target_stats).detach().cpu()
     baseline_metrics = evaluate_predictions(baseline_predictions, actual_targets)
     group_rows: list[dict[str, float | str | int]] = []
 
@@ -151,7 +123,11 @@ def get_grouped_permutation_importance(
                 frame=split.frame,
                 target_column=split.target_column,
             )
-            permuted_predictions = predict(model, permuted_split, target_stats).detach().cpu()
+            permuted_predictions = predict_regressor(
+                model,
+                permuted_split,
+                target_stats,
+            ).detach().cpu()
             permuted_metrics = evaluate_predictions(permuted_predictions, actual_targets)
             mae_deltas.append(permuted_metrics["mae"] - baseline_metrics["mae"])
             rmse_deltas.append(permuted_metrics["rmse"] - baseline_metrics["rmse"])
@@ -179,3 +155,12 @@ def get_grouped_permutation_importance(
         ascending=[False, True],
     ).reset_index(drop=True)
     return frame
+
+
+def get_model_feature_ranking(
+    model: torch.nn.Module | XGBRegressor,
+    feature_columns: Sequence[str],
+) -> pd.DataFrame:
+    """Build a sorted feature-score table for the learned backend."""
+
+    return get_feature_ranking(model, feature_columns, infer_feature_group)

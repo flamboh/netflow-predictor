@@ -8,6 +8,7 @@ from pathlib import Path
 import pandas as pd
 import torch
 from torch import nn
+from xgboost import XGBRegressor
 
 from src.cli import format_feature_blocks
 from src.data import build_feature_frame
@@ -19,27 +20,25 @@ from src.features import filter_feature_rows
 from src.features import spectrum_block_requested
 from src.features import structure_block_requested
 from src.modeling import ExperimentResult
-from src.modeling import LinearRegressionModel
 from src.modeling import RANDOM_SEED
 from src.modeling import SplitData
 from src.modeling import TargetStandardization
 from src.modeling import compute_standardization
 from src.modeling import compute_target_standardization
 from src.modeling import evaluate_baseline_family
-from src.modeling import evaluate_model
 from src.modeling import evaluate_persistence_baseline
 from src.modeling import filter_target_rows
-from src.modeling import make_loader
 from src.modeling import metrics_are_finite
-from src.modeling import move_target_stats
-from src.modeling import predict
 from src.modeling import split_by_time
 from src.modeling import standardize_split
 from src.modeling import standardize_targets
 from src.modeling import to_split
-from src.modeling import train_model
+from src.regressors import evaluate_regressor
+from src.regressors import train_regressor
+from src.regressors import validate_model_backend
 from src.modeling import validate_target_column
 from src.modeling import validate_target_kind
+from src.reporting import print_experiment_summary
 from src.targets import TargetSpec
 from src.targets import add_next_window_targets
 from src.targets import get_target_spec
@@ -87,6 +86,7 @@ def prepare_experiment_frame(
 def run_regression_experiment_once(
     frame: pd.DataFrame,
     target_column: str,
+    model_backend: str,
     feature_blocks: tuple[str, ...],
     epochs: int,
     learning_rate: float,
@@ -98,12 +98,13 @@ def run_regression_experiment_once(
     SplitData,
     SplitData,
     TargetStandardization,
-    nn.Module,
+    nn.Module | XGBRegressor,
     list[str],
 ]:
     """Run one regression experiment on one device."""
 
     validate_target_column(frame, target_column)
+    validate_model_backend(model_backend)
     target_spec = get_target_spec(target_column)
     validate_target_kind(target_spec)
     experiment_frame, feature_columns = prepare_experiment_frame(
@@ -120,36 +121,39 @@ def run_regression_experiment_once(
     baseline_test_metrics = evaluate_baseline_family(test_split, target_spec)
     persistence_valid_metrics = evaluate_persistence_baseline(valid_split, target_spec)
     persistence_test_metrics = evaluate_persistence_baseline(test_split, target_spec)
-    feature_stats = compute_standardization(train_split)
     target_stats = compute_target_standardization(train_split)
-    train_split = standardize_split(train_split, feature_stats)
-    valid_split = standardize_split(valid_split, feature_stats)
-    test_split = standardize_split(test_split, feature_stats)
-    train_split = standardize_targets(train_split, target_stats)
-    valid_split = standardize_targets(valid_split, target_stats)
-    test_split = standardize_targets(test_split, target_stats)
-    train_loader = make_loader(train_split, batch_size, shuffle=True, device=device)
-    target_stats = move_target_stats(target_stats, device)
+
+    if model_backend == "linear":
+        feature_stats = compute_standardization(train_split)
+        train_split = standardize_split(train_split, feature_stats)
+        valid_split = standardize_split(valid_split, feature_stats)
+        test_split = standardize_split(test_split, feature_stats)
+        train_split = standardize_targets(train_split, target_stats)
+        valid_split = standardize_targets(valid_split, target_stats)
+        test_split = standardize_targets(test_split, target_stats)
+
     torch.manual_seed(RANDOM_SEED)
-    model = LinearRegressionModel(feature_count=len(feature_columns)).to(device)
-    train_model(
-        model=model,
-        train_loader=train_loader,
+    model, target_stats, model_device = train_regressor(
+        model_backend=model_backend,
+        train_split=train_split,
         valid_split=valid_split,
         target_stats=target_stats,
         epochs=epochs,
         learning_rate=learning_rate,
+        batch_size=batch_size,
+        device=device,
         report_progress=report_progress,
     )
-    valid_metrics = evaluate_model(model, valid_split, target_stats)
-    test_metrics = evaluate_model(model, test_split, target_stats)
+    valid_metrics = evaluate_regressor(model, valid_split, target_stats)
+    test_metrics = evaluate_regressor(model, test_split, target_stats)
     result = ExperimentResult(
         target=target_column,
         task_kind=target_spec.task_kind,
+        model_backend=model_backend,
         feature_blocks=feature_blocks,
         feature_count=len(feature_columns),
         epochs=epochs,
-        device=device.type,
+        device=model_device,
         baseline_metrics={
             "validation": baseline_valid_metrics,
             "test": baseline_test_metrics,
@@ -170,27 +174,10 @@ def run_regression_experiment_once(
     return result, valid_split, test_split, target_stats, model, feature_columns
 
 
-def get_best_baseline_name(
-    baseline_metrics: dict[str, dict[str, float]],
-    metric_name: str,
-    maximize: bool = False,
-) -> str:
-    """Return the best naive baseline for one metric."""
-
-    metric_values = {
-        name: metrics[metric_name]
-        for name, metrics in baseline_metrics.items()
-    }
-
-    if maximize:
-        return max(metric_values, key=metric_values.get)
-
-    return min(metric_values, key=metric_values.get)
-
-
 def run_regression_experiment(
     frame: pd.DataFrame,
     target_column: str,
+    model_backend: str,
     feature_blocks: tuple[str, ...],
     epochs: int,
     learning_rate: float,
@@ -202,7 +189,7 @@ def run_regression_experiment(
     SplitData,
     SplitData,
     TargetStandardization,
-    nn.Module,
+    nn.Module | XGBRegressor,
     list[str],
 ]:
     """Run one regression experiment and retry on CPU if MPS goes non-finite."""
@@ -210,6 +197,7 @@ def run_regression_experiment(
     result, valid_split, test_split, target_stats, model, feature_columns = run_regression_experiment_once(
         frame=frame,
         target_column=target_column,
+        model_backend=model_backend,
         feature_blocks=feature_blocks,
         epochs=epochs,
         learning_rate=learning_rate,
@@ -240,6 +228,7 @@ def run_regression_experiment(
     return run_regression_experiment_once(
         frame=frame,
         target_column=target_column,
+        model_backend=model_backend,
         feature_blocks=feature_blocks,
         epochs=epochs,
         learning_rate=learning_rate,
@@ -249,93 +238,11 @@ def run_regression_experiment(
     )
 
 
-def print_experiment_summary(results: list[ExperimentResult]) -> None:
-    """Print a compact experiment comparison table."""
-
-    summary_rows = []
-
-    for result in results:
-        best_valid_baseline = get_best_baseline_name(
-            result.baseline_metrics["validation"],
-            "mae",
-        )
-        best_test_baseline = get_best_baseline_name(
-            result.baseline_metrics["test"],
-            "mae",
-        )
-        best_test_r2_baseline = get_best_baseline_name(
-            result.baseline_metrics["test"],
-            "r2",
-            maximize=True,
-        )
-        best_valid_baseline_metrics = result.baseline_metrics["validation"][
-            best_valid_baseline
-        ]
-        best_test_baseline_metrics = result.baseline_metrics["test"][
-            best_test_baseline
-        ]
-        best_test_r2_metrics = result.baseline_metrics["test"][
-            best_test_r2_baseline
-        ]
-        summary_rows.append(
-            {
-                "target": result.target,
-                "blocks": format_feature_blocks(result.feature_blocks),
-                "features": result.feature_count,
-                "epochs": result.epochs,
-                "device": result.device,
-                "best_val_baseline": best_valid_baseline,
-                "best_test_baseline": best_test_baseline,
-                "best_test_r2_baseline": best_test_r2_baseline,
-                "persist_val_mae": round(result.persistence_valid_mae, 2),
-                "best_val_mae": round(best_valid_baseline_metrics["mae"], 2),
-                "model_val_mae": round(result.model_valid_mae, 2),
-                "val_mae_delta": round(
-                    result.model_valid_mae - result.persistence_valid_mae,
-                    2,
-                ),
-                "vs_best_val_mae": round(
-                    result.model_valid_mae - best_valid_baseline_metrics["mae"],
-                    2,
-                ),
-                "persist_val_r2": round(result.persistence_valid_r2, 6),
-                "model_val_r2": round(result.model_valid_r2, 6),
-                "val_r2_delta": round(
-                    result.model_valid_r2 - result.persistence_valid_r2,
-                    6,
-                ),
-                "persist_test_mae": round(result.persistence_test_mae, 2),
-                "best_test_mae": round(best_test_baseline_metrics["mae"], 2),
-                "model_test_mae": round(result.model_test_mae, 2),
-                "mae_delta": round(
-                    result.model_test_mae - result.persistence_test_mae,
-                    2,
-                ),
-                "vs_best_test_mae": round(
-                    result.model_test_mae - best_test_baseline_metrics["mae"],
-                    2,
-                ),
-                "persist_test_r2": round(result.persistence_test_r2, 6),
-                "best_test_r2": round(best_test_r2_metrics["r2"], 6),
-                "model_test_r2": round(result.model_test_r2, 6),
-                "r2_delta": round(
-                    result.model_test_r2 - result.persistence_test_r2,
-                    6,
-                ),
-                "vs_best_test_r2": round(
-                    result.model_test_r2 - best_test_r2_metrics["r2"],
-                    6,
-                ),
-            }
-        )
-
-    print(pd.DataFrame(summary_rows).to_string(index=False))
-
-
 def run_experiment_matrix(
     frame: pd.DataFrame,
     targets: list[str],
     block_configs: list[tuple[str, ...]],
+    model_backend: str,
     epochs: int,
     learning_rate: float,
     batch_size: int,
@@ -350,7 +257,8 @@ def run_experiment_matrix(
 
     print(
         "Running experiments: "
-        f"{total_experiments} configs, epochs={epochs}, device={device.type}",
+        f"{total_experiments} configs, backend={model_backend}, "
+        f"epochs={epochs}, device={device.type}",
         flush=True,
     )
 
@@ -368,6 +276,7 @@ def run_experiment_matrix(
             result, _, _, _, _, _ = run_regression_experiment(
                 frame=frame,
                 target_column=target_column,
+                model_backend=model_backend,
                 feature_blocks=feature_blocks,
                 epochs=epochs,
                 learning_rate=learning_rate,
@@ -397,66 +306,3 @@ def run_experiment_matrix(
     print()
     print_experiment_summary(results)
     return results
-
-
-def show_test_examples(
-    model: nn.Module,
-    split: SplitData,
-    target_stats: TargetStandardization,
-) -> None:
-    """Print a few held-out predictions."""
-
-    predictions = predict(model, split, target_stats).cpu().numpy()
-    example_frame = split.frame[
-        ["router_name", "timestamp", split.target_column]
-    ].copy()
-    example_frame = example_frame.rename(columns={"router_name": "router"})
-    example_frame = example_frame.rename(
-        columns={split.target_column: "actual_target"}
-    )
-    example_frame["predicted_target"] = predictions
-    print()
-    print("Sample test predictions:")
-    print(example_frame.head(10).to_string(index=False))
-
-
-def show_requested_prediction(
-    model: nn.Module,
-    split: SplitData,
-    target_stats: TargetStandardization,
-    router: str | None,
-    timestamp: int | None,
-) -> None:
-    """Print the prediction for one requested 5-minute trace."""
-
-    if router is None or timestamp is None:
-        return
-
-    matches = split.frame["router_name"].eq(router)
-    matches &= split.frame["timestamp"].eq(timestamp)
-
-    if int(matches.sum()) == 0:
-        print()
-        print("Requested trace was not found in the test split.")
-        return
-
-    prediction_frame = split.frame.loc[
-        matches,
-        ["router_name", "timestamp", split.target_column],
-    ].copy()
-    prediction_frame = prediction_frame.rename(columns={"router_name": "router"})
-    prediction_split = SplitData(
-        features=split.features[matches.to_numpy()],
-        targets=split.targets[matches.to_numpy()],
-        frame=prediction_frame,
-        target_column=split.target_column,
-    )
-    prediction = predict(model, prediction_split, target_stats).item()
-    actual = prediction_frame[split.target_column].iloc[0]
-    print()
-    print("Requested trace prediction:")
-    print(f"router={router}")
-    print(f"timestamp={timestamp}")
-    print(f"target={split.target_column}")
-    print(f"predicted_value={prediction:.2f}")
-    print(f"actual_value={actual:.2f}")

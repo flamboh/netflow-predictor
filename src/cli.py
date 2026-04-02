@@ -49,6 +49,12 @@ def parse_args() -> argparse.Namespace:
         help="Device to use: auto, cpu, mps, or cuda.",
     )
     parser.add_argument(
+        "--model-backend",
+        type=str,
+        default="linear",
+        help="Regression backend to use: linear or xgboost.",
+    )
+    parser.add_argument(
         "--router",
         type=str,
         default=None,
