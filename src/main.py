@@ -32,7 +32,7 @@ def main() -> None:
     args = parse_args()
     device = resolve_device(args.device)
     train_router = None if args.train_router.strip().lower() == "all" else args.train_router
-    learning_rate = 0.001 if args.model_backend == "gru" else 0.01
+    learning_rate = 0.001 if args.model_backend in ("gru", "mlp", "curve_gru") else 0.01
     if args.learning_rate is not None:
         learning_rate = args.learning_rate
     frame = build_modeling_frame(args.database, train_router)
@@ -55,6 +55,8 @@ def main() -> None:
             learning_rate=learning_rate,
             batch_size=args.batch_size,
             device=device,
+            loss_name=args.loss,
+            target_transform=args.target_transform,
         )
         return
 
@@ -69,6 +71,8 @@ def main() -> None:
         learning_rate=learning_rate,
         batch_size=args.batch_size,
         device=device,
+        loss_name=args.loss,
+        target_transform=args.target_transform,
         report_progress=True,
     )
     print()
@@ -78,6 +82,10 @@ def main() -> None:
         device=result.device,
         train_router=args.train_router,
         learning_rate=learning_rate,
+        loss_name=args.loss or (
+            "huber" if args.model_backend in ("gru", "mlp", "curve_gru") else "mse"
+        ),
+        target_transform=target_stats.transform_name,
         feature_blocks=feature_blocks,
         feature_count=result.feature_count,
         epochs=result.epochs,
@@ -86,8 +94,10 @@ def main() -> None:
     print()
     print_run_results(result)
     if args.show_feature_ranking:
-        if args.model_backend == "gru":
-            raise ValueError("Feature ranking is not supported for the gru backend.")
+        if args.model_backend in ("gru", "mlp", "curve_gru"):
+            raise ValueError(
+                "Feature ranking is not supported for neural sequence backends."
+            )
 
         ranking = get_model_feature_ranking(model, feature_columns)
         ranking = filter_ranked_features(

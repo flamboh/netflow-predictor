@@ -7,7 +7,11 @@ from collections.abc import Iterable
 import pandas as pd
 
 from src.curve_features import SPECTRUM_FEATURE_COLUMNS
+from src.curve_features import SPECTRUM_RAW_FEATURE_COLUMNS
 from src.curve_features import STRUCTURE_FEATURE_COLUMNS
+from src.curve_features import STRUCTURE_RAW_FEATURE_COLUMNS
+from src.curve_features import extract_spectrum_curve_points
+from src.curve_features import extract_structure_curve_points
 from src.curve_features import summarize_spectrum_curve
 from src.curve_features import summarize_structure_curve
 
@@ -16,9 +20,16 @@ BASE_FEATURE_COLUMNS = (
     "flows",
     "packets",
     "bytes",
+    "flows_tcp",
+    "flows_udp",
+    "bytes_tcp",
+    "bytes_udp",
     "sa_ipv4_count",
     "da_ipv4_count",
+    "sa_ipv6_count",
+    "da_ipv6_count",
     "unique_protocols_count_ipv4",
+    "unique_protocols_count_ipv6",
     "time_of_day_sin",
     "time_of_day_cos",
     "time_of_week_sin",
@@ -28,6 +39,8 @@ FEATURE_BLOCK_NAMES = (
     "base",
     "spectrum",
     "structure",
+    "spectrum_raw",
+    "structure_raw",
 )
 
 
@@ -94,11 +107,29 @@ def add_spectrum_features(
 
     enriched = frame.copy()
     derived = enriched[spectrum_column].apply(summarize_spectrum_curve)
+    return pd.concat([enriched, derived.loc[:, SPECTRUM_FEATURE_COLUMNS]], axis=1)
 
-    for column in SPECTRUM_FEATURE_COLUMNS:
-        enriched[column] = derived[column]
 
-    return enriched
+def add_spectrum_raw_features(
+    frame: pd.DataFrame,
+    target_base_column: str,
+) -> pd.DataFrame:
+    """Add raw spectrum pointwise features for the selected target family."""
+
+    axis_token, family_token = get_target_axis_tokens(target_base_column)
+
+    if family_token != "ipv4":
+        raise ValueError(
+            "Spectrum features are currently available only for IPv4 targets."
+        )
+
+    spectrum_column = f"spectrum_json_{axis_token}"
+    if spectrum_column not in frame.columns:
+        raise ValueError(f"Missing spectrum column: {spectrum_column}")
+
+    enriched = frame.copy()
+    derived = enriched[spectrum_column].apply(extract_spectrum_curve_points)
+    return pd.concat([enriched, derived.loc[:, SPECTRUM_RAW_FEATURE_COLUMNS]], axis=1)
 
 
 def add_structure_features(
@@ -120,11 +151,29 @@ def add_structure_features(
 
     enriched = frame.copy()
     derived = enriched[structure_column].apply(summarize_structure_curve)
+    return pd.concat([enriched, derived.loc[:, STRUCTURE_FEATURE_COLUMNS]], axis=1)
 
-    for column in STRUCTURE_FEATURE_COLUMNS:
-        enriched[column] = derived[column]
 
-    return enriched
+def add_structure_raw_features(
+    frame: pd.DataFrame,
+    target_base_column: str,
+) -> pd.DataFrame:
+    """Add raw structure pointwise features for the selected target family."""
+
+    axis_token, family_token = get_target_axis_tokens(target_base_column)
+
+    if family_token != "ipv4":
+        raise ValueError(
+            "Structure features are currently available only for IPv4 targets."
+        )
+
+    structure_column = f"structure_json_{axis_token}"
+    if structure_column not in frame.columns:
+        raise ValueError(f"Missing structure column: {structure_column}")
+
+    enriched = frame.copy()
+    derived = enriched[structure_column].apply(extract_structure_curve_points)
+    return pd.concat([enriched, derived.loc[:, STRUCTURE_RAW_FEATURE_COLUMNS]], axis=1)
 
 
 def prepare_feature_frame(
@@ -141,6 +190,12 @@ def prepare_feature_frame(
 
     if "structure" in feature_blocks:
         prepared = add_structure_features(prepared, target_base_column)
+
+    if "spectrum_raw" in feature_blocks:
+        prepared = add_spectrum_raw_features(prepared, target_base_column)
+
+    if "structure_raw" in feature_blocks:
+        prepared = add_structure_raw_features(prepared, target_base_column)
 
     return prepared
 
@@ -167,6 +222,12 @@ def choose_feature_columns(
 
     if "structure" in feature_blocks:
         feature_columns.extend(STRUCTURE_FEATURE_COLUMNS)
+
+    if "spectrum_raw" in feature_blocks:
+        feature_columns.extend(SPECTRUM_RAW_FEATURE_COLUMNS)
+
+    if "structure_raw" in feature_blocks:
+        feature_columns.extend(STRUCTURE_RAW_FEATURE_COLUMNS)
 
     return ordered_unique(feature_columns)
 

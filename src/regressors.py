@@ -12,15 +12,25 @@ from torch.utils.data import DataLoader
 from torch.utils.data import TensorDataset
 from xgboost import XGBRegressor
 
+from src.curve_features import SPECTRUM_RAW_FEATURE_COLUMNS
+from src.curve_features import SPECTRUM_RAW_POINT_COUNT
+from src.curve_features import STRUCTURE_RAW_FEATURE_COLUMNS
+from src.curve_features import STRUCTURE_RAW_POINT_COUNT
+from src.deep_models import CurveGRUInputSpec
+from src.deep_models import CurveGRURegressionModel
+from src.deep_models import GRURegressionModel
+from src.deep_models import MLPRegressionModel
 from src.modeling import RANDOM_SEED
 from src.modeling import SplitData
 from src.modeling import TargetStandardization
 from src.modeling import evaluate_predictions
+from src.modeling import invert_target_transform
 
 
-MODEL_BACKENDS = ("linear", "xgboost", "gru")
-GRU_PATIENCE = 50
+MODEL_BACKENDS = ("linear", "xgboost", "gru", "mlp", "curve_gru")
+GRU_PATIENCE = 75
 GRU_GRAD_CLIP = 1.0
+LOSS_NAMES = ("mse", "huber")
 
 
 class LinearRegressionModel(nn.Module):
@@ -34,23 +44,6 @@ class LinearRegressionModel(nn.Module):
         return self.linear(features).squeeze(1)
 
 
-class GRURegressionModel(nn.Module):
-    """A small GRU regressor over fixed-length windows."""
-
-    def __init__(self, feature_count: int, hidden_size: int = 64) -> None:
-        super().__init__()
-        self.gru = nn.GRU(
-            input_size=feature_count,
-            hidden_size=hidden_size,
-            batch_first=True,
-        )
-        self.output = nn.Linear(hidden_size, 1)
-
-    def forward(self, features: torch.Tensor) -> torch.Tensor:
-        _, hidden = self.gru(features)
-        return self.output(hidden[-1]).squeeze(1)
-
-
 def validate_model_backend(model_backend: str) -> None:
     """Fail early on unknown regression backends."""
 
@@ -59,6 +52,56 @@ def validate_model_backend(model_backend: str) -> None:
 
     available_backends = ", ".join(MODEL_BACKENDS)
     raise ValueError(f"Unknown model backend: {model_backend}. Available: {available_backends}")
+
+
+def validate_loss_name(loss_name: str) -> None:
+    """Fail early on unknown torch loss choices."""
+
+    if loss_name in LOSS_NAMES:
+        return
+
+    available_losses = ", ".join(LOSS_NAMES)
+    raise ValueError(f"Unknown loss: {loss_name}. Available: {available_losses}")
+
+
+def build_curve_gru_input_spec(
+    feature_columns: Sequence[str],
+) -> CurveGRUInputSpec:
+    """Partition one feature vector into scalar and raw-curve slices."""
+
+    spectrum_lookup = set(SPECTRUM_RAW_FEATURE_COLUMNS)
+    structure_lookup = set(STRUCTURE_RAW_FEATURE_COLUMNS)
+    scalar_indices: list[int] = []
+    spectrum_indices: list[int] = []
+    structure_indices: list[int] = []
+
+    for index, feature_name in enumerate(feature_columns):
+        if feature_name in spectrum_lookup:
+            spectrum_indices.append(index)
+            continue
+        if feature_name in structure_lookup:
+            structure_indices.append(index)
+            continue
+        scalar_indices.append(index)
+
+    if len(spectrum_indices) != len(SPECTRUM_RAW_FEATURE_COLUMNS):
+        raise ValueError(
+            "curve_gru requires the full spectrum_raw feature block."
+        )
+    if len(structure_indices) != len(STRUCTURE_RAW_FEATURE_COLUMNS):
+        raise ValueError(
+            "curve_gru requires the full structure_raw feature block."
+        )
+    if not scalar_indices:
+        raise ValueError("curve_gru requires at least one non-raw feature.")
+
+    return CurveGRUInputSpec(
+        scalar_indices=tuple(scalar_indices),
+        spectrum_raw_indices=tuple(spectrum_indices),
+        structure_raw_indices=tuple(structure_indices),
+        spectrum_point_count=SPECTRUM_RAW_POINT_COUNT,
+        structure_point_count=STRUCTURE_RAW_POINT_COUNT,
+    )
 
 
 def move_target_stats(
@@ -70,6 +113,7 @@ def move_target_stats(
     return TargetStandardization(
         mean=stats.mean.to(device),
         std=stats.std.to(device),
+        transform_name=stats.transform_name,
     )
 
 
@@ -99,6 +143,17 @@ def make_loader(
     )
 
 
+def make_loss(loss_name: str) -> nn.Module:
+    """Build the requested regression loss."""
+
+    validate_loss_name(loss_name)
+
+    if loss_name == "mse":
+        return nn.MSELoss()
+
+    return nn.HuberLoss()
+
+
 def train_torch_model(
     model: nn.Module,
     model_backend: str,
@@ -107,20 +162,32 @@ def train_torch_model(
     target_stats: TargetStandardization,
     epochs: int,
     learning_rate: float,
+    loss_name: str,
     report_progress: bool = True,
 ) -> None:
     """Fit one torch-based regression model."""
 
     device = get_model_device(model)
-    optimizer = torch.optim.Adam(model.parameters(), lr=learning_rate)
-    loss_fn = nn.MSELoss()
+    weight_decay = 1e-4 if model_backend in ("gru", "mlp", "curve_gru") else 0.0
+    optimizer = torch.optim.Adam(
+        model.parameters(),
+        lr=learning_rate,
+        weight_decay=weight_decay,
+    )
+    loss_fn = make_loss(loss_name)
+    scheduler = torch.optim.lr_scheduler.ReduceLROnPlateau(
+        optimizer,
+        mode="min",
+        factor=0.5,
+        patience=10,
+    )
     best_valid_rmse = float("inf")
     best_state = {
         name: parameter.detach().cpu().clone()
         for name, parameter in model.state_dict().items()
     }
     epochs_without_improvement = 0
-    patience = GRU_PATIENCE if model_backend == "gru" else epochs
+    patience = GRU_PATIENCE if model_backend in ("gru", "mlp", "curve_gru") else epochs
 
     for epoch in range(epochs):
         model.train()
@@ -132,11 +199,12 @@ def train_torch_model(
             predictions = model(feature_batch)
             loss = loss_fn(predictions, target_batch)
             loss.backward()
-            if model_backend == "gru":
+            if model_backend in ("gru", "mlp", "curve_gru"):
                 nn.utils.clip_grad_norm_(model.parameters(), GRU_GRAD_CLIP)
             optimizer.step()
 
         valid_metrics = evaluate_regressor(model, valid_split, target_stats)
+        scheduler.step(valid_metrics["rmse"])
 
         if valid_metrics["rmse"] < best_valid_rmse:
             best_valid_rmse = valid_metrics["rmse"]
@@ -212,11 +280,21 @@ def train_regressor(
     learning_rate: float,
     batch_size: int,
     device: torch.device,
-    report_progress: bool,
+    feature_columns: Sequence[str] | None = None,
+    loss_name: str | None = None,
+    report_progress: bool = True,
 ) -> tuple[nn.Module | XGBRegressor, TargetStandardization, str]:
     """Train one supported regression backend."""
 
     validate_model_backend(model_backend)
+
+    if loss_name is None:
+        if model_backend in ("gru", "mlp", "curve_gru"):
+            loss_name = "huber"
+        else:
+            loss_name = "mse"
+
+    validate_loss_name(loss_name)
 
     if model_backend == "xgboost":
         model, backend_device = train_xgboost_model(
@@ -235,8 +313,17 @@ def train_regressor(
 
     if model_backend == "linear":
         model = LinearRegressionModel(feature_count=train_split.features.shape[-1]).to(device)
-    else:
+    elif model_backend == "gru":
         model = GRURegressionModel(feature_count=train_split.features.shape[-1]).to(device)
+    elif model_backend == "curve_gru":
+        if feature_columns is None:
+            raise ValueError("curve_gru requires feature column metadata.")
+        input_spec = build_curve_gru_input_spec(feature_columns)
+        model = CurveGRURegressionModel(input_spec=input_spec).to(device)
+    else:
+        model = MLPRegressionModel(
+            input_shape=tuple(train_split.features.shape[1:]),
+        ).to(device)
 
     train_torch_model(
         model=model,
@@ -246,6 +333,7 @@ def train_regressor(
         target_stats=moved_target_stats,
         epochs=epochs,
         learning_rate=learning_rate,
+        loss_name=loss_name,
         report_progress=report_progress,
     )
     return model, moved_target_stats, device.type
@@ -265,7 +353,14 @@ def predict_regressor(
         with torch.no_grad():
             scaled_predictions = model(split.features.to(device))
 
-        return scaled_predictions * target_stats.std.to(device) + target_stats.mean.to(device)
+        transformed_predictions = (
+            scaled_predictions * target_stats.std.to(device)
+            + target_stats.mean.to(device)
+        )
+        return invert_target_transform(
+            transformed_predictions,
+            target_stats.transform_name,
+        )
 
     predictions = model.predict(split.features.numpy())
     return torch.tensor(predictions, dtype=torch.float32)

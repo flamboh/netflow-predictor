@@ -18,7 +18,7 @@ def parse_args() -> argparse.Namespace:
     """Read command line arguments."""
 
     parser = argparse.ArgumentParser(
-        description="Train netflow prediction baselines and GRU experiments."
+        description="Train netflow prediction baselines and deep sequence experiments."
     )
     parser.add_argument(
         "--database",
@@ -42,7 +42,7 @@ def parse_args() -> argparse.Namespace:
         "--learning-rate",
         type=float,
         default=None,
-        help="Optimizer learning rate. Default: 0.01 for linear/xgboost, 0.001 for gru.",
+        help="Optimizer learning rate. Default: 0.01 for linear/xgboost, 0.001 for gru/mlp/curve_gru.",
     )
     parser.add_argument(
         "--batch-size",
@@ -54,7 +54,7 @@ def parse_args() -> argparse.Namespace:
         "--sequence-length",
         type=int,
         default=12,
-        help="Sequence length used by the GRU backend.",
+        help="Sequence length used by sequence backends such as gru, mlp, and curve_gru.",
     )
     parser.add_argument(
         "--device",
@@ -66,7 +66,7 @@ def parse_args() -> argparse.Namespace:
         "--model-backend",
         type=str,
         default="linear",
-        help="Regression backend to use: linear, xgboost, or gru.",
+        help="Regression backend to use: linear, xgboost, gru, mlp, or curve_gru.",
     )
     parser.add_argument(
         "--router",
@@ -95,7 +95,19 @@ def parse_args() -> argparse.Namespace:
         "--feature-blocks",
         type=str,
         default="base",
-        help="Comma-separated feature blocks. Available: base,spectrum,structure.",
+        help="Comma-separated feature blocks. Available: base,spectrum,structure,spectrum_raw,structure_raw.",
+    )
+    parser.add_argument(
+        "--loss",
+        type=str,
+        default=None,
+        help="Torch loss for trainable neural backends: mse or huber. Default: huber for gru/mlp/curve_gru, mse otherwise.",
+    )
+    parser.add_argument(
+        "--target-transform",
+        type=str,
+        default=None,
+        help="Torch target transform: standard or signed_log1p. Default: standard.",
     )
     parser.add_argument(
         "--show-feature-ranking",

@@ -25,6 +25,7 @@ from src.modeling import evaluate_baseline_family
 from src.modeling import evaluate_persistence_baseline
 from src.modeling import filter_target_rows
 from src.modeling import metrics_are_finite
+from src.modeling import resolve_target_transform
 from src.modeling import split_by_time
 from src.modeling import standardize_split
 from src.modeling import standardize_targets
@@ -84,7 +85,7 @@ def make_model_splits(
 
     train_frame, valid_frame, test_frame = split_by_time(frame)
 
-    if model_backend == "gru":
+    if model_backend in ("gru", "mlp", "curve_gru"):
         train_split = to_sequence_split(
             train_frame,
             feature_columns,
@@ -96,12 +97,14 @@ def make_model_splits(
             feature_columns,
             target_column,
             sequence_length,
+            prior_history_rows=train_frame,
         )
         test_split = to_sequence_split(
             test_frame,
             feature_columns,
             target_column,
             sequence_length,
+            prior_history_rows=pd.concat([train_frame, valid_frame], ignore_index=True),
         )
         return train_split, valid_split, test_split
 
@@ -122,6 +125,8 @@ def run_regression_experiment_once(
     learning_rate: float,
     batch_size: int,
     device: torch.device,
+    loss_name: str | None,
+    target_transform: str | None,
     report_progress: bool,
 ) -> tuple[
     ExperimentResult,
@@ -154,7 +159,18 @@ def run_regression_experiment_once(
     baseline_test_metrics = evaluate_baseline_family(test_split, target_spec)
     persistence_valid_metrics = evaluate_persistence_baseline(valid_split, target_spec)
     persistence_test_metrics = evaluate_persistence_baseline(test_split, target_spec)
-    target_stats = compute_target_standardization(train_split)
+    target_transform = resolve_target_transform(
+        model_backend=model_backend,
+        target_spec=target_spec,
+        requested_transform=target_transform,
+    )
+
+    if model_backend == "xgboost" and target_transform != "standard":
+        raise ValueError(
+            "Target transforms are currently supported only for torch backends."
+        )
+
+    target_stats = compute_target_standardization(train_split, target_transform)
 
     if model_backend != "xgboost":
         feature_stats = compute_standardization(train_split)
@@ -175,6 +191,8 @@ def run_regression_experiment_once(
         learning_rate=learning_rate,
         batch_size=batch_size,
         device=device,
+        feature_columns=feature_columns,
+        loss_name=loss_name,
         report_progress=report_progress,
     )
     valid_metrics = evaluate_regressor(model, valid_split, target_stats)
@@ -217,6 +235,8 @@ def run_regression_experiment(
     learning_rate: float,
     batch_size: int,
     device: torch.device,
+    loss_name: str | None,
+    target_transform: str | None,
     report_progress: bool,
 ) -> tuple[
     ExperimentResult,
@@ -238,6 +258,8 @@ def run_regression_experiment(
         learning_rate=learning_rate,
         batch_size=batch_size,
         device=device,
+        loss_name=loss_name,
+        target_transform=target_transform,
         report_progress=report_progress,
     )
 
@@ -270,6 +292,8 @@ def run_regression_experiment(
         learning_rate=learning_rate,
         batch_size=batch_size,
         device=torch.device("cpu"),
+        loss_name=loss_name,
+        target_transform=target_transform,
         report_progress=report_progress,
     )
 
@@ -284,6 +308,8 @@ def run_experiment_matrix(
     learning_rate: float,
     batch_size: int,
     device: torch.device,
+    loss_name: str | None = None,
+    target_transform: str | None = None,
 ) -> list[ExperimentResult]:
     """Run and print a matrix of experiments."""
 
@@ -318,6 +344,8 @@ def run_experiment_matrix(
                 learning_rate=learning_rate,
                 batch_size=batch_size,
                 device=device,
+                loss_name=loss_name,
+                target_transform=target_transform,
                 report_progress=False,
             )
             results.append(result)

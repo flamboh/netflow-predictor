@@ -15,6 +15,7 @@ from src.targets import get_target_spec
 TRAIN_RATIO = 0.70
 VALID_RATIO = 0.15
 RANDOM_SEED = 0
+TARGET_TRANSFORM_NAMES = ("standard", "signed_log1p")
 
 
 @dataclass
@@ -41,6 +42,7 @@ class TargetStandardization:
 
     mean: torch.Tensor
     std: torch.Tensor
+    transform_name: str
 
 
 @dataclass
@@ -178,13 +180,76 @@ def standardize_split(split: SplitData, stats: Standardization) -> SplitData:
     )
 
 
-def compute_target_standardization(split: SplitData) -> TargetStandardization:
+def validate_target_transform_name(transform_name: str) -> None:
+    """Fail early on unknown target transforms."""
+
+    if transform_name in TARGET_TRANSFORM_NAMES:
+        return
+
+    available_names = ", ".join(TARGET_TRANSFORM_NAMES)
+    raise ValueError(
+        f"Unknown target transform: {transform_name}. "
+        f"Available: {available_names}"
+    )
+
+
+def apply_target_transform(
+    values: torch.Tensor,
+    transform_name: str,
+) -> torch.Tensor:
+    """Apply one supported target transform."""
+
+    validate_target_transform_name(transform_name)
+
+    if transform_name == "standard":
+        return values
+
+    return torch.sign(values) * torch.log1p(values.abs())
+
+
+def invert_target_transform(
+    values: torch.Tensor,
+    transform_name: str,
+) -> torch.Tensor:
+    """Invert one supported target transform."""
+
+    validate_target_transform_name(transform_name)
+
+    if transform_name == "standard":
+        return values
+
+    return torch.sign(values) * torch.expm1(values.abs())
+
+
+def resolve_target_transform(
+    model_backend: str,
+    target_spec: TargetSpec,
+    requested_transform: str | None,
+) -> str:
+    """Choose the target transform for one experiment."""
+
+    if requested_transform is not None:
+        validate_target_transform_name(requested_transform)
+        return requested_transform
+
+    return "standard"
+
+
+def compute_target_standardization(
+    split: SplitData,
+    transform_name: str,
+) -> TargetStandardization:
     """Compute training-set scaling values for the target."""
 
-    mean = split.targets.mean()
-    std = split.targets.std(correction=0)
+    transformed_targets = apply_target_transform(split.targets, transform_name)
+    mean = transformed_targets.mean()
+    std = transformed_targets.std(correction=0)
     std = torch.where(std == 0, torch.ones_like(std), std)
-    return TargetStandardization(mean=mean, std=std)
+    return TargetStandardization(
+        mean=mean,
+        std=std,
+        transform_name=transform_name,
+    )
 
 
 def standardize_targets(
@@ -193,9 +258,10 @@ def standardize_targets(
 ) -> SplitData:
     """Apply training-set target scaling to one split."""
 
+    transformed_targets = apply_target_transform(split.targets, stats.transform_name)
     return SplitData(
         features=split.features,
-        targets=(split.targets - stats.mean) / stats.std,
+        targets=(transformed_targets - stats.mean) / stats.std,
         frame=split.frame,
         target_column=split.target_column,
     )
