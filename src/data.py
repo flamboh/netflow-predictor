@@ -86,8 +86,8 @@ def load_base_frame(database_path: Path) -> pd.DataFrame:
     structure_stats = read_table(connection, structure_query)
     connection.close()
 
-    merged = netflow.merge(ip_stats, on=["router", "timestamp"], how="left")
-    merged = merged.merge(protocol_stats, on=["router", "timestamp"], how="left")
+    merged = netflow.merge(ip_stats, on=["router", "timestamp"], how="inner")
+    merged = merged.merge(protocol_stats, on=["router", "timestamp"], how="inner")
     merged = merged.merge(spectrum_stats, on=["router", "timestamp"], how="left")
     merged = merged.merge(structure_stats, on=["router", "timestamp"], how="left")
     return merged

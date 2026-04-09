@@ -5,7 +5,8 @@ next-window netflow targets from 5-minute traces.
 
 Current modeling path:
 
-- It reads the SQLite dataset in `data/netflow_window.sqlite`.
+- It reads the SQLite dataset in
+  `data/2025-03-01-to-2026-03-31/netflow_window.sqlite`.
 - It derives next-window count, delta, and direction targets.
 - It uses a reduced feature set:
   base traffic/count features, cyclical time features, compact spectrum
