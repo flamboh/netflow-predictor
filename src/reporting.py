@@ -54,6 +54,7 @@ def print_run_config(
     model_backend: str,
     device: str,
     train_router: str,
+    learning_rate: float,
     feature_blocks: tuple[str, ...],
     feature_count: int,
     epochs: int,
@@ -67,6 +68,7 @@ def print_run_config(
     print(f"  target   {target_column}")
     print(f"  router   {train_router}")
     print(f"  blocks   {blocks_str:<16}  features  {feature_count}")
+    print(f"  lr       {learning_rate:<16.6g}")
     print(f"  epochs   {epochs:<16}  seq_len   {sequence_length}")
 
 

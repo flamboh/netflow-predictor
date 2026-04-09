@@ -41,8 +41,8 @@ def parse_args() -> argparse.Namespace:
     parser.add_argument(
         "--learning-rate",
         type=float,
-        default=0.01,
-        help="Optimizer learning rate.",
+        default=None,
+        help="Optimizer learning rate. Default: 0.01 for linear/xgboost, 0.001 for gru.",
     )
     parser.add_argument(
         "--batch-size",

@@ -32,6 +32,9 @@ def main() -> None:
     args = parse_args()
     device = resolve_device(args.device)
     train_router = None if args.train_router.strip().lower() == "all" else args.train_router
+    learning_rate = 0.001 if args.model_backend == "gru" else 0.01
+    if args.learning_rate is not None:
+        learning_rate = args.learning_rate
     frame = build_modeling_frame(args.database, train_router)
 
     if args.describe_targets:
@@ -49,7 +52,7 @@ def main() -> None:
             model_backend=args.model_backend,
             sequence_length=args.sequence_length,
             epochs=args.epochs,
-            learning_rate=args.learning_rate,
+            learning_rate=learning_rate,
             batch_size=args.batch_size,
             device=device,
         )
@@ -63,7 +66,7 @@ def main() -> None:
         feature_blocks=feature_blocks,
         sequence_length=args.sequence_length,
         epochs=args.epochs,
-        learning_rate=args.learning_rate,
+        learning_rate=learning_rate,
         batch_size=args.batch_size,
         device=device,
         report_progress=True,
@@ -74,6 +77,7 @@ def main() -> None:
         model_backend=result.model_backend,
         device=result.device,
         train_router=args.train_router,
+        learning_rate=learning_rate,
         feature_blocks=feature_blocks,
         feature_count=result.feature_count,
         epochs=result.epochs,

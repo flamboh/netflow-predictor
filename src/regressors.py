@@ -19,6 +19,8 @@ from src.modeling import evaluate_predictions
 
 
 MODEL_BACKENDS = ("linear", "xgboost", "gru")
+GRU_PATIENCE = 50
+GRU_GRAD_CLIP = 1.0
 
 
 class LinearRegressionModel(nn.Module):
@@ -99,6 +101,7 @@ def make_loader(
 
 def train_torch_model(
     model: nn.Module,
+    model_backend: str,
     train_loader: DataLoader,
     valid_split: SplitData,
     target_stats: TargetStandardization,
@@ -111,6 +114,13 @@ def train_torch_model(
     device = get_model_device(model)
     optimizer = torch.optim.Adam(model.parameters(), lr=learning_rate)
     loss_fn = nn.MSELoss()
+    best_valid_rmse = float("inf")
+    best_state = {
+        name: parameter.detach().cpu().clone()
+        for name, parameter in model.state_dict().items()
+    }
+    epochs_without_improvement = 0
+    patience = GRU_PATIENCE if model_backend == "gru" else epochs
 
     for epoch in range(epochs):
         model.train()
@@ -122,16 +132,39 @@ def train_torch_model(
             predictions = model(feature_batch)
             loss = loss_fn(predictions, target_batch)
             loss.backward()
+            if model_backend == "gru":
+                nn.utils.clip_grad_norm_(model.parameters(), GRU_GRAD_CLIP)
             optimizer.step()
 
+        valid_metrics = evaluate_regressor(model, valid_split, target_stats)
+
+        if valid_metrics["rmse"] < best_valid_rmse:
+            best_valid_rmse = valid_metrics["rmse"]
+            best_state = {
+                name: parameter.detach().cpu().clone()
+                for name, parameter in model.state_dict().items()
+            }
+            epochs_without_improvement = 0
+        else:
+            epochs_without_improvement += 1
+
         if report_progress and ((epoch + 1) % 25 == 0 or epoch == 0):
-            valid_metrics = evaluate_regressor(model, valid_split, target_stats)
             print(
                 f"epoch={epoch + 1} "
                 f"valid_mae={valid_metrics['mae']:.2f} "
                 f"valid_rmse={valid_metrics['rmse']:.2f} "
                 f"valid_r2={valid_metrics['r2']:.4f}"
             )
+
+        if epochs_without_improvement >= patience:
+            if report_progress:
+                print(
+                    f"early_stop epoch={epoch + 1} "
+                    f"best_valid_rmse={best_valid_rmse:.2f}"
+                )
+            break
+
+    model.load_state_dict(best_state)
 
 
 def train_xgboost_model(
@@ -207,6 +240,7 @@ def train_regressor(
 
     train_torch_model(
         model=model,
+        model_backend=model_backend,
         train_loader=train_loader,
         valid_split=valid_split,
         target_stats=moved_target_stats,
