@@ -41,10 +41,13 @@ from src.targets import add_next_window_targets
 from src.targets import get_target_spec
 
 
-def build_modeling_frame(database_path: Path) -> pd.DataFrame:
+def build_modeling_frame(
+    database_path: Path,
+    train_router: str | None,
+) -> pd.DataFrame:
     """Load the modeling frame once before running experiments."""
 
-    frame = build_feature_frame(database_path)
+    frame = build_feature_frame(database_path, train_router=train_router)
     return add_next_window_targets(frame)
 
 
@@ -253,8 +256,8 @@ def run_regression_experiment(
         return result, valid_split, test_split, target_stats, model, feature_columns
 
     print(
-        "Warning: non-finite metrics on MPS; retrying on CPU "
-        f"for target={target_column} blocks={format_feature_blocks(feature_blocks)}",
+        f"[WARN] non-finite metrics on MPS, retrying on CPU  "
+        f"target={target_column}  blocks={format_feature_blocks(feature_blocks)}",
         flush=True,
     )
     return run_regression_experiment_once(
@@ -290,9 +293,9 @@ def run_experiment_matrix(
     overall_start = time.perf_counter()
 
     print(
-        "Running experiments: "
-        f"{total_experiments} configs, backend={model_backend}, "
-        f"seq_len={sequence_length}, epochs={epochs}, device={device.type}",
+        f"Running {total_experiments} experiments  "
+        f"backend={model_backend}  seq_len={sequence_length}  "
+        f"epochs={epochs}  device={device.type}",
         flush=True,
     )
 
@@ -301,10 +304,8 @@ def run_experiment_matrix(
             completed_experiments += 1
             experiment_start = time.perf_counter()
             print(
-                f"[{completed_experiments}/{total_experiments}] "
-                f"target={target_column} "
-                f"blocks={format_feature_blocks(feature_blocks)} "
-                "starting",
+                f"[{completed_experiments}/{total_experiments}]  "
+                f"{target_column}  blocks={format_feature_blocks(feature_blocks)}",
                 flush=True,
             )
             result, _, _, _, _, _ = run_regression_experiment(
@@ -322,22 +323,20 @@ def run_experiment_matrix(
             results.append(result)
             elapsed_seconds = time.perf_counter() - experiment_start
             print(
-                f"[{completed_experiments}/{total_experiments}] "
-                f"target={target_column} "
-                f"blocks={format_feature_blocks(feature_blocks)} "
-                f"done in {elapsed_seconds:.1f}s "
-                f"device={result.device} "
-                f"test_mae={result.model_test_mae:.2f} "
-                f"test_r2={result.model_test_r2:.6f}",
+                f"[{completed_experiments}/{total_experiments}]  done in {elapsed_seconds:.1f}s  "
+                f"{target_column}  blocks={format_feature_blocks(feature_blocks)}  "
+                f"test_mae={result.model_test_mae:.2f}  test_r2={result.model_test_r2:.4f}  "
+                f"device={result.device}",
                 flush=True,
             )
 
     total_elapsed_seconds = time.perf_counter() - overall_start
     print(
-        f"Completed {total_experiments} experiments "
-        f"in {total_elapsed_seconds:.1f}s",
+        f"Completed {total_experiments} experiments in {total_elapsed_seconds:.1f}s",
         flush=True,
     )
+    print()
+    print(f"Experiment summary ({total_experiments} runs):")
     print()
     print_experiment_summary(results)
     return results

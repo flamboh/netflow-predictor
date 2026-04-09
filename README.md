@@ -7,6 +7,7 @@ Current modeling path:
 
 - It reads the SQLite dataset in
   `data/2025-03-01-to-2026-03-31/netflow_window.sqlite`.
+- By default it trains on `oh_ir1_gw` only.
 - It derives next-window count, delta, and direction targets.
 - It uses a reduced feature set:
   base traffic/count features, cyclical time features, compact spectrum
@@ -17,6 +18,12 @@ Run the baseline with `uv`:
 
 ```bash
 uv run python -m src.main
+```
+
+Train on all routers:
+
+```bash
+uv run python -m src.main --train-router all
 ```
 
 Run the GRU baseline:

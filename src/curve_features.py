@@ -26,7 +26,13 @@ STRUCTURE_FEATURE_COLUMNS = (
 def summarize_spectrum_curve(curve_json: str) -> pd.Series:
     """Convert one spectrum JSON blob into the reduced summary set."""
 
+    if pd.isna(curve_json):
+        return pd.Series({column: pd.NA for column in SPECTRUM_FEATURE_COLUMNS})
+
     curve = json.loads(curve_json)
+    if not curve:
+        return pd.Series({column: pd.NA for column in SPECTRUM_FEATURE_COLUMNS})
+
     alphas = [float(point["alpha"]) for point in curve]
     f_values = [float(point["f"]) for point in curve]
     alpha_at_f_max_index = max(range(len(f_values)), key=f_values.__getitem__)
@@ -47,14 +53,20 @@ def summarize_spectrum_curve(curve_json: str) -> pd.Series:
 def summarize_structure_curve(curve_json: str) -> pd.Series:
     """Convert one structure JSON blob into the reduced q-point summary set."""
 
+    if pd.isna(curve_json):
+        return pd.Series({column: pd.NA for column in STRUCTURE_FEATURE_COLUMNS})
+
     curve = json.loads(curve_json)
+    if not curve:
+        return pd.Series({column: pd.NA for column in STRUCTURE_FEATURE_COLUMNS})
+
     points_by_q = {float(point["q"]): point for point in curve}
 
     try:
         q0 = points_by_q[0.0]
         q2 = points_by_q[2.0]
     except KeyError as error:
-        raise ValueError("Structure curve is missing q=0.0 or q=2.0.") from error
+        return pd.Series({column: pd.NA for column in STRUCTURE_FEATURE_COLUMNS})
 
     return pd.Series(
         {

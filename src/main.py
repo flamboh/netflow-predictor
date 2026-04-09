@@ -2,10 +2,8 @@
 
 from __future__ import annotations
 
-import pandas as pd
 import torch
 
-from src.cli import format_feature_blocks
 from src.cli import parse_args
 from src.cli import parse_experiment_feature_blocks
 from src.cli import parse_experiment_targets
@@ -20,6 +18,8 @@ from src.feature_analysis import get_grouped_permutation_importance
 from src.feature_analysis import get_model_feature_ranking
 from src.modeling import RANDOM_SEED
 from src.modeling import resolve_device
+from src.reporting import print_run_config
+from src.reporting import print_run_results
 from src.reporting import show_requested_prediction
 from src.reporting import show_test_examples
 from src.targets import describe_targets
@@ -31,7 +31,8 @@ def main() -> None:
     torch.manual_seed(RANDOM_SEED)
     args = parse_args()
     device = resolve_device(args.device)
-    frame = build_modeling_frame(args.database)
+    train_router = None if args.train_router.strip().lower() == "all" else args.train_router
+    frame = build_modeling_frame(args.database, train_router)
 
     if args.describe_targets:
         target_summary = describe_targets(frame)
@@ -68,67 +69,18 @@ def main() -> None:
         report_progress=True,
     )
     print()
-    print("Model backend:")
-    print(result.model_backend)
-    print()
-    print("Device:")
-    print(result.device)
-    print()
-    print("Sequence length:")
-    print(args.sequence_length)
-    print()
-    print("Feature blocks:")
-    print(format_feature_blocks(feature_blocks))
-    print()
-    print("Persistence baseline metrics:")
-    print(f"target={args.target}")
-    print(
-        "validation="
-        f"{{'mae': {result.persistence_valid_mae}, "
-        f"'rmse': {result.persistence_valid_rmse}, "
-        f"'r2': {result.persistence_valid_r2}}}"
-    )
-    print(
-        "test="
-        f"{{'mae': {result.persistence_test_mae}, "
-        f"'rmse': {result.persistence_test_rmse}, "
-        f"'r2': {result.persistence_test_r2}}}"
-    )
-    baseline_rows = []
-
-    for split_name, baseline_metrics in result.baseline_metrics.items():
-        for baseline_name, metric_values in baseline_metrics.items():
-            baseline_rows.append(
-                {
-                    "split": split_name,
-                    "baseline": baseline_name,
-                    "mae": round(metric_values["mae"], 2),
-                    "rmse": round(metric_values["rmse"], 2),
-                    "r2": round(metric_values["r2"], 6),
-                }
-            )
-    print()
-    print("Naive baseline comparison:")
-    print(pd.DataFrame(baseline_rows).to_string(index=False))
-    print()
-    print("Validation metrics:")
-    print(f"target={args.target}")
-    print(
-        {
-            "mae": result.model_valid_mae,
-            "rmse": result.model_valid_rmse,
-            "r2": result.model_valid_r2,
-        }
+    print_run_config(
+        target_column=args.target,
+        model_backend=result.model_backend,
+        device=result.device,
+        train_router=args.train_router,
+        feature_blocks=feature_blocks,
+        feature_count=result.feature_count,
+        epochs=result.epochs,
+        sequence_length=args.sequence_length,
     )
     print()
-    print("Test metrics:")
-    print(
-        {
-            "mae": result.model_test_mae,
-            "rmse": result.model_test_rmse,
-            "r2": result.model_test_r2,
-        }
-    )
+    print_run_results(result)
     if args.show_feature_ranking:
         if args.model_backend == "gru":
             raise ValueError("Feature ranking is not supported for the gru backend.")
@@ -140,7 +92,7 @@ def main() -> None:
         )
         ranking = ranking.head(args.ranking_top_k)
         print()
-        print("Feature ranking:")
+        print(f"Feature ranking  (top {args.ranking_top_k}):")
         if ranking.empty:
             print("No features matched the requested ranking prefixes.")
         else:
@@ -161,8 +113,7 @@ def main() -> None:
             repeats=args.permutation_repeats,
         )
         print()
-        print("Grouped permutation importance:")
-        print(f"split={args.permutation_split}")
+        print(f"Grouped permutation importance  (split={args.permutation_split})")
         if importance.empty:
             print("No groups matched the current feature set.")
         else:

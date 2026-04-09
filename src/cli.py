@@ -11,6 +11,7 @@ from src.features import FEATURE_BLOCK_NAMES
 DEFAULT_TARGET_COLUMN = "next_sa_ipv4_count_delta"
 DEFAULT_FEATURE_BLOCKS = ("base",)
 DEFAULT_DATABASE_PATH = Path("data/2025-03-01-to-2026-03-31/netflow_window.sqlite")
+DEFAULT_TRAIN_ROUTER = "oh_ir1_gw"
 
 
 def parse_args() -> argparse.Namespace:
@@ -24,6 +25,12 @@ def parse_args() -> argparse.Namespace:
         type=Path,
         default=DEFAULT_DATABASE_PATH,
         help="Path to the SQLite dataset.",
+    )
+    parser.add_argument(
+        "--train-router",
+        type=str,
+        default=DEFAULT_TRAIN_ROUTER,
+        help="Router to train on. Use all to disable router filtering.",
     )
     parser.add_argument(
         "--epochs",

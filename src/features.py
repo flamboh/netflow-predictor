@@ -70,14 +70,9 @@ def get_target_axis_tokens(target_base_column: str) -> tuple[str, str]:
 
 
 def make_base_feature_names(frame: pd.DataFrame) -> list[str]:
-    """List current-window base features, including router indicators."""
+    """List current-window base features."""
 
-    router_columns = sorted(
-        column
-        for column in frame.columns
-        if column.startswith("router_") and column != "router_name"
-    )
-    return list(BASE_FEATURE_COLUMNS) + router_columns
+    return list(BASE_FEATURE_COLUMNS)
 
 
 def add_spectrum_features(

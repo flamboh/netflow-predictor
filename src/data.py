@@ -137,19 +137,25 @@ def add_time_features(frame: pd.DataFrame) -> pd.DataFrame:
 
 
 def add_router_features(frame: pd.DataFrame) -> pd.DataFrame:
-    """Create one-hot router features."""
+    """Preserve router identity for reporting and sequence grouping."""
 
     encoded = frame.copy()
     encoded["router_name"] = encoded["router"]
-    encoded = pd.get_dummies(encoded, columns=["router"], dtype=float)
     return encoded
 
 
-def build_feature_frame(database_path: Path) -> pd.DataFrame:
+def build_feature_frame(
+    database_path: Path,
+    train_router: str | None = None,
+) -> pd.DataFrame:
     """Build the final modeling frame."""
 
     frame = load_base_frame(database_path)
     frame = validate_join_features(frame)
+
+    if train_router is not None:
+        frame = frame.loc[frame["router"].eq(train_router)].reset_index(drop=True)
+
     frame = add_time_features(frame)
     frame = add_router_features(frame)
     return frame

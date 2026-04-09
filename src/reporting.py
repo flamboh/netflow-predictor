@@ -39,7 +39,89 @@ def format_baseline_name(baseline_name: str) -> str:
         "moving_avg_3": "ma3",
         "moving_avg_12": "ma12",
         "lag_12": "lag12",
-    }[baseline_name]
+    }.get(baseline_name, baseline_name)
+
+
+def _signed(value: float, decimals: int = 2) -> str:
+    """Format a float with an explicit leading sign."""
+
+    formatted = f"{abs(value):.{decimals}f}"
+    return f"+{formatted}" if value >= 0 else f"-{formatted}"
+
+
+def print_run_config(
+    target_column: str,
+    model_backend: str,
+    device: str,
+    train_router: str,
+    feature_blocks: tuple[str, ...],
+    feature_count: int,
+    epochs: int,
+    sequence_length: int,
+) -> None:
+    """Print a compact run configuration block."""
+
+    blocks_str = format_feature_blocks(feature_blocks)
+    print("Config")
+    print(f"  backend  {model_backend:<16}  device    {device}")
+    print(f"  target   {target_column}")
+    print(f"  router   {train_router}")
+    print(f"  blocks   {blocks_str:<16}  features  {feature_count}")
+    print(f"  epochs   {epochs:<16}  seq_len   {sequence_length}")
+
+
+def print_run_results(result: ExperimentResult) -> None:
+    """Print a unified model-vs-baseline results table."""
+
+    best_valid_name = get_best_baseline_name(
+        result.baseline_metrics["validation"], "mae"
+    )
+    best_test_name = get_best_baseline_name(
+        result.baseline_metrics["test"], "mae"
+    )
+    bv = result.baseline_metrics["validation"][best_valid_name]
+    bt = result.baseline_metrics["test"][best_test_name]
+
+    val_dmae  = result.model_valid_mae - bv["mae"]
+    val_dr2   = result.model_valid_r2  - bv["r2"]
+    test_dmae = result.model_test_mae  - bt["mae"]
+    test_dr2  = result.model_test_r2   - bt["r2"]
+
+    label_w = 22
+    col_w = 9
+
+    def row(label: str, a: str, b: str, c: str, d: str) -> str:
+        return f"  {label:<{label_w}}  {a:>{col_w}}  {b:>{col_w}}  {c:>{col_w}}  {d:>{col_w}}"
+
+    sep = "  " + "-" * (label_w + 4 * (col_w + 2) + 2)
+    base_label = f"baseline ({format_baseline_name(best_test_name)})"
+
+    print(f"Results  target={result.target}")
+    print()
+    print(row("", "val_mae", "val_r2", "test_mae", "test_r2"))
+    print(sep)
+    print(row(
+        "model",
+        f"{result.model_valid_mae:.2f}",
+        f"{result.model_valid_r2:.4f}",
+        f"{result.model_test_mae:.2f}",
+        f"{result.model_test_r2:.4f}",
+    ))
+    print(row(
+        base_label,
+        f"{bv['mae']:.2f}",
+        f"{bv['r2']:.4f}",
+        f"{bt['mae']:.2f}",
+        f"{bt['r2']:.4f}",
+    ))
+    print(sep)
+    print(row(
+        "Δ vs baseline",
+        _signed(val_dmae),
+        _signed(val_dr2, 4),
+        _signed(test_dmae),
+        _signed(test_dr2, 4),
+    ))
 
 
 def print_experiment_summary(results: list[ExperimentResult]) -> None:
@@ -48,53 +130,31 @@ def print_experiment_summary(results: list[ExperimentResult]) -> None:
     summary_rows = []
 
     for result in results:
-        best_valid_baseline = get_best_baseline_name(
-            result.baseline_metrics["validation"],
-            "mae",
+        best_valid_name = get_best_baseline_name(
+            result.baseline_metrics["validation"], "mae"
         )
-        best_test_baseline = get_best_baseline_name(
-            result.baseline_metrics["test"],
-            "mae",
+        best_test_name = get_best_baseline_name(
+            result.baseline_metrics["test"], "mae"
         )
-        best_test_r2_baseline = get_best_baseline_name(
-            result.baseline_metrics["test"],
-            "r2",
-            maximize=True,
+        best_test_r2_name = get_best_baseline_name(
+            result.baseline_metrics["test"], "r2", maximize=True
         )
-        best_valid_baseline_metrics = result.baseline_metrics["validation"][
-            best_valid_baseline
-        ]
-        best_test_baseline_metrics = result.baseline_metrics["test"][
-            best_test_baseline
-        ]
-        best_test_r2_metrics = result.baseline_metrics["test"][
-            best_test_r2_baseline
-        ]
+        bv = result.baseline_metrics["validation"][best_valid_name]
+        bt = result.baseline_metrics["test"][best_test_name]
+        bt_r2 = result.baseline_metrics["test"][best_test_r2_name]
+
         summary_rows.append(
             {
-                "target": result.target,
-                "model": result.model_backend,
-                "blocks": format_feature_blocks(result.feature_blocks),
-                "feats": result.feature_count,
-                "ep": result.epochs,
-                "dev": result.device,
-                "base_mae": format_baseline_name(best_test_baseline),
-                "base_r2": format_baseline_name(best_test_r2_baseline),
-                "val_mae": round(result.model_valid_mae, 2),
-                "val_vs_base": round(
-                    result.model_valid_mae - best_valid_baseline_metrics["mae"],
-                    2,
-                ),
-                "test_mae": round(result.model_test_mae, 2),
-                "test_vs_base": round(
-                    result.model_test_mae - best_test_baseline_metrics["mae"],
-                    2,
-                ),
-                "test_r2": round(result.model_test_r2, 6),
-                "r2_vs_base": round(
-                    result.model_test_r2 - best_test_r2_metrics["r2"],
-                    6,
-                ),
+                "target":    result.target,
+                "model":     result.model_backend,
+                "blocks":    format_feature_blocks(result.feature_blocks),
+                "feats":     result.feature_count,
+                "val_mae":   round(result.model_valid_mae, 2),
+                "val_Δmae":  round(result.model_valid_mae - bv["mae"], 2),
+                "test_mae":  round(result.model_test_mae, 2),
+                "test_Δmae": round(result.model_test_mae - bt["mae"], 2),
+                "test_r2":   round(result.model_test_r2, 4),
+                "test_Δr2":  round(result.model_test_r2 - bt_r2["r2"], 4),
             }
         )
 
@@ -106,19 +166,22 @@ def show_test_examples(
     split: SplitData,
     target_stats: TargetStandardization,
 ) -> None:
-    """Print a few held-out predictions."""
+    """Print a few held-out predictions with an error column."""
 
     predictions = predict_regressor(model, split, target_stats).cpu().numpy()
     example_frame = split.frame[
         ["router_name", "timestamp", split.target_column]
     ].copy()
-    example_frame = example_frame.rename(columns={"router_name": "router"})
     example_frame = example_frame.rename(
-        columns={split.target_column: "actual_target"}
+        columns={"router_name": "router", split.target_column: "actual"}
     )
-    example_frame["predicted_target"] = predictions
+    example_frame["actual"]    = example_frame["actual"].round(2)
+    example_frame["predicted"] = predictions.round(2)
+    example_frame["error"]     = (
+        example_frame["predicted"] - example_frame["actual"]
+    ).round(2)
     print()
-    print("Sample test predictions:")
+    print("Sample test predictions (first 10):")
     print(example_frame.head(10).to_string(index=False))
 
 
@@ -139,7 +202,10 @@ def show_requested_prediction(
 
     if int(matches.sum()) == 0:
         print()
-        print("Requested trace was not found in the test split.")
+        print(
+            f"Requested trace not found in test split  "
+            f"(router={router}, timestamp={timestamp})"
+        )
         return
 
     prediction_frame = split.frame.loc[
@@ -156,9 +222,10 @@ def show_requested_prediction(
     prediction = predict_regressor(model, prediction_split, target_stats).item()
     actual = prediction_frame[split.target_column].iloc[0]
     print()
-    print("Requested trace prediction:")
-    print(f"router={router}")
-    print(f"timestamp={timestamp}")
-    print(f"target={split.target_column}")
-    print(f"predicted_value={prediction:.2f}")
-    print(f"actual_value={actual:.2f}")
+    print("Requested trace:")
+    print(f"  router     {router}")
+    print(f"  timestamp  {timestamp}")
+    print(f"  target     {split.target_column}")
+    print(f"  actual     {actual:.2f}")
+    print(f"  predicted  {prediction:.2f}")
+    print(f"  error      {_signed(prediction - actual)}")
