@@ -1,126 +1,40 @@
-"""Feature construction for portable target-family experiments."""
+"""Reduced feature assembly for tabular and sequence runners."""
 
 from __future__ import annotations
 
 from collections.abc import Iterable
-import json
-import math
 
 import pandas as pd
 
-from src.targets import COUNT_TARGET_BASES
+from src.curve_features import SPECTRUM_FEATURE_COLUMNS
+from src.curve_features import STRUCTURE_FEATURE_COLUMNS
+from src.curve_features import summarize_spectrum_curve
+from src.curve_features import summarize_structure_curve
 
 
-GENERAL_FEATURE_COLUMNS = (
+BASE_FEATURE_COLUMNS = (
     "flows",
     "packets",
-    "flows_tcp",
-    "flows_udp",
+    "bytes",
+    "sa_ipv4_count",
+    "da_ipv4_count",
     "unique_protocols_count_ipv4",
-    "unique_protocols_count_ipv6",
-    "hour_of_day",
-    "day_of_week",
+    "time_of_day_sin",
+    "time_of_day_cos",
+    "time_of_week_sin",
+    "time_of_week_cos",
 )
-DEFAULT_TARGET_LAGS = (1, 2, 3, 12)
-DEFAULT_ROLLING_WINDOWS = (3, 12)
-CURVE_SAMPLE_COUNT = 5
 FEATURE_BLOCK_NAMES = (
-    "target",
-    "general",
-    "context",
+    "base",
     "spectrum",
-    "spectrum_region_summary",
     "structure",
-    "structure_summary",
-    "structure_tau_samples",
-    "structure_sd_samples",
-    "structure_region_summary",
 )
-
-
-def structure_block_requested(feature_blocks: tuple[str, ...]) -> bool:
-    """Return whether any structure-derived block was requested."""
-
-    return any(
-        block in feature_blocks
-        for block in (
-            "structure",
-            "structure_summary",
-            "structure_tau_samples",
-            "structure_sd_samples",
-            "structure_region_summary",
-        )
-    )
-
-
-def spectrum_block_requested(feature_blocks: tuple[str, ...]) -> bool:
-    """Return whether any spectrum-derived block was requested."""
-
-    return any(
-        block in feature_blocks
-        for block in (
-            "spectrum",
-            "spectrum_region_summary",
-        )
-    )
-
-
-def compute_mean(values: list[float]) -> float:
-    """Compute the mean of a non-empty float list."""
-
-    return sum(values) / len(values)
-
-
-def compute_std(values: list[float]) -> float:
-    """Compute population standard deviation of a non-empty float list."""
-
-    mean = compute_mean(values)
-    variance = sum((value - mean) ** 2 for value in values) / len(values)
-    return math.sqrt(variance)
-
-
-def sample_values(values: list[float], sample_count: int = CURVE_SAMPLE_COUNT) -> list[float]:
-    """Sample a fixed number of ordered values from a variable-length list."""
-
-    if len(values) == 1:
-        return [values[0]] * sample_count
-
-    sampled: list[float] = []
-
-    for index in range(sample_count):
-        position = round(index * (len(values) - 1) / (sample_count - 1))
-        sampled.append(values[position])
-
-    return sampled
-
-
-def compute_region_means(values: list[float]) -> dict[str, float]:
-    """Compute left/middle/right means over an ordered curve."""
-
-    left_end = max(1, len(values) // 3)
-    right_start = max(left_end + 1, (2 * len(values)) // 3)
-    left_values = values[:left_end]
-    middle_values = values[left_end:right_start]
-    right_values = values[right_start:]
-
-    if not middle_values:
-        middle_values = values[left_end - 1:left_end]
-
-    if not right_values:
-        right_values = values[-1:]
-
-    return {
-        "left": compute_mean(left_values),
-        "middle": compute_mean(middle_values),
-        "right": compute_mean(right_values),
-    }
 
 
 def ordered_unique(columns: Iterable[str]) -> list[str]:
     """Keep first-seen order while removing duplicates."""
 
-    ordered = list(dict.fromkeys(columns))
-    return ordered
+    return list(dict.fromkeys(columns))
 
 
 def get_router_column(frame: pd.DataFrame) -> str:
@@ -133,37 +47,6 @@ def get_router_column(frame: pd.DataFrame) -> str:
         return "router_name"
 
     raise ValueError("Expected router or router_name column in feature frame.")
-
-
-def make_target_feature_names(
-    base_column: str,
-    lags: tuple[int, ...] = DEFAULT_TARGET_LAGS,
-    rolling_windows: tuple[int, ...] = DEFAULT_ROLLING_WINDOWS,
-) -> list[str]:
-    """List target-family feature names for one base count column."""
-
-    names = [base_column]
-    names.extend(f"{base_column}_lag_{lag}" for lag in lags)
-    names.extend(
-        f"{base_column}_rolling_mean_{window}"
-        for window in rolling_windows
-    )
-    names.extend(
-        f"{base_column}_rolling_std_{window}"
-        for window in rolling_windows
-    )
-    return names
-
-
-def make_context_feature_names(target_base_column: str) -> list[str]:
-    """List non-target count columns used as optional context."""
-
-    names = [
-        column
-        for column in COUNT_TARGET_BASES
-        if column != target_base_column
-    ]
-    return names
 
 
 def get_target_axis_tokens(target_base_column: str) -> tuple[str, str]:
@@ -186,218 +69,22 @@ def get_target_axis_tokens(target_base_column: str) -> tuple[str, str]:
     return axis_token, family_token
 
 
-def make_spectrum_feature_names(
-    sample_count: int = CURVE_SAMPLE_COUNT,
-) -> list[str]:
-    """List derived spectrum feature names."""
+def make_base_feature_names(frame: pd.DataFrame) -> list[str]:
+    """List current-window base features, including router indicators."""
 
-    names = [
-        "spectrum_points",
-        "spectrum_alpha_min",
-        "spectrum_alpha_max",
-        "spectrum_alpha_range",
-        "spectrum_f_max",
-        "spectrum_f_mean",
-        "spectrum_f_std",
-        "spectrum_alpha_at_f_max",
-        "spectrum_area",
-    ]
-    names.extend(f"spectrum_alpha_sample_{index}" for index in range(sample_count))
-    names.extend(f"spectrum_f_sample_{index}" for index in range(sample_count))
-    return names
-
-
-def make_structure_feature_names(
-    sample_count: int = CURVE_SAMPLE_COUNT,
-) -> list[str]:
-    """List derived structure feature names."""
-
-    names = [
-        "structure_points",
-        "structure_tau_min",
-        "structure_tau_max",
-        "structure_tau_mean",
-        "structure_tau_std",
-        "structure_sd_max",
-        "structure_sd_mean",
-        "structure_sd_std",
-    ]
-    names.extend(f"structure_tau_sample_{index}" for index in range(sample_count))
-    names.extend(f"structure_sd_sample_{index}" for index in range(sample_count))
-    return names
-
-
-def make_structure_summary_feature_names() -> list[str]:
-    """List structure summary feature names."""
-
-    return [
-        "structure_points",
-        "structure_tau_min",
-        "structure_tau_max",
-        "structure_tau_mean",
-        "structure_tau_std",
-        "structure_sd_max",
-        "structure_sd_mean",
-        "structure_sd_std",
-    ]
-
-
-def make_structure_tau_sample_feature_names(
-    sample_count: int = CURVE_SAMPLE_COUNT,
-) -> list[str]:
-    """List sampled structure tau feature names."""
-
-    return [f"structure_tau_sample_{index}" for index in range(sample_count)]
-
-
-def make_structure_sd_sample_feature_names(
-    sample_count: int = CURVE_SAMPLE_COUNT,
-) -> list[str]:
-    """List sampled structure sd feature names."""
-
-    return [f"structure_sd_sample_{index}" for index in range(sample_count)]
-
-
-def make_structure_region_summary_feature_names() -> list[str]:
-    """List region-summary structure feature names."""
-
-    return [
-        "structure_tau_left_mean",
-        "structure_tau_middle_mean",
-        "structure_tau_right_mean",
-        "structure_sd_left_mean",
-        "structure_sd_middle_mean",
-        "structure_sd_right_mean",
-    ]
-
-
-def make_spectrum_region_summary_feature_names() -> list[str]:
-    """List region-summary spectrum feature names."""
-
-    return [
-        "spectrum_alpha_left_mean",
-        "spectrum_alpha_middle_mean",
-        "spectrum_alpha_right_mean",
-        "spectrum_f_left_mean",
-        "spectrum_f_middle_mean",
-        "spectrum_f_right_mean",
-    ]
-
-
-def summarize_spectrum_curve(curve_json: str) -> pd.Series:
-    """Convert one spectrum JSON blob into compact numeric features."""
-
-    curve = json.loads(curve_json)
-    alphas = [float(point["alpha"]) for point in curve]
-    f_values = [float(point["f"]) for point in curve]
-    alpha_min = min(alphas)
-    alpha_max = max(alphas)
-    f_max_index = max(range(len(f_values)), key=f_values.__getitem__)
-    ordered_pairs = sorted(zip(alphas, f_values))
-    area = 0.0
-
-    for (alpha_1, f_1), (alpha_2, f_2) in zip(ordered_pairs, ordered_pairs[1:]):
-        area += (alpha_2 - alpha_1) * (f_1 + f_2) / 2.0
-
-    values: dict[str, float] = {
-        "spectrum_points": float(len(curve)),
-        "spectrum_alpha_min": alpha_min,
-        "spectrum_alpha_max": alpha_max,
-        "spectrum_alpha_range": alpha_max - alpha_min,
-        "spectrum_f_max": max(f_values),
-        "spectrum_f_mean": compute_mean(f_values),
-        "spectrum_f_std": compute_std(f_values),
-        "spectrum_alpha_at_f_max": alphas[f_max_index],
-        "spectrum_area": area,
-    }
-    alpha_regions = compute_region_means(alphas)
-    f_regions = compute_region_means(f_values)
-    values["spectrum_alpha_left_mean"] = alpha_regions["left"]
-    values["spectrum_alpha_middle_mean"] = alpha_regions["middle"]
-    values["spectrum_alpha_right_mean"] = alpha_regions["right"]
-    values["spectrum_f_left_mean"] = f_regions["left"]
-    values["spectrum_f_middle_mean"] = f_regions["middle"]
-    values["spectrum_f_right_mean"] = f_regions["right"]
-
-    for index, value in enumerate(sample_values(alphas)):
-        values[f"spectrum_alpha_sample_{index}"] = value
-
-    for index, value in enumerate(sample_values(f_values)):
-        values[f"spectrum_f_sample_{index}"] = value
-
-    return pd.Series(values)
-
-
-def summarize_structure_curve(curve_json: str) -> pd.Series:
-    """Convert one structure JSON blob into compact numeric features."""
-
-    curve = json.loads(curve_json)
-    tau_values = [float(point["tau"]) for point in curve]
-    sd_values = [float(point["sd"]) for point in curve]
-    values: dict[str, float] = {
-        "structure_points": float(len(curve)),
-        "structure_tau_min": min(tau_values),
-        "structure_tau_max": max(tau_values),
-        "structure_tau_mean": compute_mean(tau_values),
-        "structure_tau_std": compute_std(tau_values),
-        "structure_sd_max": max(sd_values),
-        "structure_sd_mean": compute_mean(sd_values),
-        "structure_sd_std": compute_std(sd_values),
-    }
-    tau_regions = compute_region_means(tau_values)
-    sd_regions = compute_region_means(sd_values)
-    values["structure_tau_left_mean"] = tau_regions["left"]
-    values["structure_tau_middle_mean"] = tau_regions["middle"]
-    values["structure_tau_right_mean"] = tau_regions["right"]
-    values["structure_sd_left_mean"] = sd_regions["left"]
-    values["structure_sd_middle_mean"] = sd_regions["middle"]
-    values["structure_sd_right_mean"] = sd_regions["right"]
-
-    for index, value in enumerate(sample_values(tau_values)):
-        values[f"structure_tau_sample_{index}"] = value
-
-    for index, value in enumerate(sample_values(sd_values)):
-        values[f"structure_sd_sample_{index}"] = value
-
-    return pd.Series(values)
-
-
-def add_target_family_features(
-    frame: pd.DataFrame,
-    base_column: str,
-    lags: tuple[int, ...] = DEFAULT_TARGET_LAGS,
-    rolling_windows: tuple[int, ...] = DEFAULT_ROLLING_WINDOWS,
-) -> pd.DataFrame:
-    """Add portable lag and rolling features for one target family."""
-
-    if base_column not in frame.columns:
-        raise ValueError(f"Unknown target feature base column: {base_column}")
-
-    router_column = get_router_column(frame)
-    enriched = frame.sort_values([router_column, "timestamp"]).copy()
-    router_groups = enriched.groupby(router_column, sort=False)[base_column]
-
-    for lag in lags:
-        enriched[f"{base_column}_lag_{lag}"] = router_groups.shift(lag)
-
-    for window in rolling_windows:
-        rolling = (
-            router_groups
-            .rolling(window=window, min_periods=window)
-            .agg(["mean", "std"])
-            .reset_index(level=0, drop=True)
-        )
-        enriched[f"{base_column}_rolling_mean_{window}"] = rolling["mean"]
-        enriched[f"{base_column}_rolling_std_{window}"] = rolling["std"]
-
-    return enriched
+    router_columns = sorted(
+        column
+        for column in frame.columns
+        if column.startswith("router_") and column != "router_name"
+    )
+    return list(BASE_FEATURE_COLUMNS) + router_columns
 
 
 def add_spectrum_features(
     frame: pd.DataFrame,
     target_base_column: str,
 ) -> pd.DataFrame:
-    """Add derived spectrum features for the selected target family."""
+    """Add reduced spectrum summaries for the selected target family."""
 
     axis_token, family_token = get_target_axis_tokens(target_base_column)
 
@@ -412,11 +99,10 @@ def add_spectrum_features(
 
     enriched = frame.copy()
     derived = enriched[spectrum_column].apply(summarize_spectrum_curve)
-    for column in (
-        make_spectrum_feature_names()
-        + make_spectrum_region_summary_feature_names()
-    ):
+
+    for column in SPECTRUM_FEATURE_COLUMNS:
         enriched[column] = derived[column]
+
     return enriched
 
 
@@ -424,7 +110,7 @@ def add_structure_features(
     frame: pd.DataFrame,
     target_base_column: str,
 ) -> pd.DataFrame:
-    """Add derived structure features for the selected target family."""
+    """Add reduced structure summaries for the selected target family."""
 
     axis_token, family_token = get_target_axis_tokens(target_base_column)
 
@@ -439,21 +125,36 @@ def add_structure_features(
 
     enriched = frame.copy()
     derived = enriched[structure_column].apply(summarize_structure_curve)
-    for column in (
-        make_structure_feature_names()
-        + make_structure_region_summary_feature_names()
-    ):
+
+    for column in STRUCTURE_FEATURE_COLUMNS:
         enriched[column] = derived[column]
+
     return enriched
+
+
+def prepare_feature_frame(
+    frame: pd.DataFrame,
+    target_base_column: str,
+    feature_blocks: tuple[str, ...],
+) -> pd.DataFrame:
+    """Materialize only the requested feature families."""
+
+    prepared = frame
+
+    if "spectrum" in feature_blocks:
+        prepared = add_spectrum_features(prepared, target_base_column)
+
+    if "structure" in feature_blocks:
+        prepared = add_structure_features(prepared, target_base_column)
+
+    return prepared
 
 
 def choose_feature_columns(
     frame: pd.DataFrame,
-    target_base_column: str,
-    feature_blocks: tuple[str, ...] = ("target", "general"),
-    general_columns: tuple[str, ...] = GENERAL_FEATURE_COLUMNS,
+    feature_blocks: tuple[str, ...] = ("base",),
 ) -> list[str]:
-    """Assemble ordered portable feature columns."""
+    """Assemble ordered feature columns for one experiment."""
 
     unknown_blocks = set(feature_blocks) - set(FEATURE_BLOCK_NAMES)
 
@@ -463,46 +164,16 @@ def choose_feature_columns(
 
     feature_columns: list[str] = []
 
-    if "target" in feature_blocks:
-        feature_columns.extend(make_target_feature_names(target_base_column))
-
-    if "general" in feature_blocks:
-        feature_columns.extend(general_columns)
-
-    if "context" in feature_blocks:
-        feature_columns.extend(make_context_feature_names(target_base_column))
+    if "base" in feature_blocks:
+        feature_columns.extend(make_base_feature_names(frame))
 
     if "spectrum" in feature_blocks:
-        feature_columns.extend(make_spectrum_feature_names())
-
-    if "spectrum_region_summary" in feature_blocks:
-        feature_columns.extend(make_spectrum_region_summary_feature_names())
+        feature_columns.extend(SPECTRUM_FEATURE_COLUMNS)
 
     if "structure" in feature_blocks:
-        feature_columns.extend(make_structure_feature_names())
-    else:
-        if "structure_summary" in feature_blocks:
-            feature_columns.extend(make_structure_summary_feature_names())
+        feature_columns.extend(STRUCTURE_FEATURE_COLUMNS)
 
-        if "structure_tau_samples" in feature_blocks:
-            feature_columns.extend(make_structure_tau_sample_feature_names())
-
-        if "structure_sd_samples" in feature_blocks:
-            feature_columns.extend(make_structure_sd_sample_feature_names())
-
-        if "structure_region_summary" in feature_blocks:
-            feature_columns.extend(make_structure_region_summary_feature_names())
-
-    if "general" in feature_blocks:
-        router_columns = sorted(
-            column
-            for column in frame.columns
-            if column.startswith("router_") and column != "router_name"
-        )
-        feature_columns.extend(router_columns)
-
-    feature_columns = ordered_unique(feature_columns)
-    return feature_columns
+    return ordered_unique(feature_columns)
 
 
 def filter_feature_rows(
@@ -511,5 +182,4 @@ def filter_feature_rows(
 ) -> pd.DataFrame:
     """Drop rows where required features are unavailable."""
 
-    filtered = frame.dropna(subset=feature_columns).reset_index(drop=True)
-    return filtered
+    return frame.dropna(subset=feature_columns).reset_index(drop=True)

@@ -18,7 +18,7 @@ from src.modeling import TargetStandardization
 from src.modeling import evaluate_predictions
 
 
-MODEL_BACKENDS = ("linear", "xgboost")
+MODEL_BACKENDS = ("linear", "xgboost", "gru")
 
 
 class LinearRegressionModel(nn.Module):
@@ -29,8 +29,24 @@ class LinearRegressionModel(nn.Module):
         self.linear = nn.Linear(feature_count, 1)
 
     def forward(self, features: torch.Tensor) -> torch.Tensor:
-        predictions = self.linear(features)
-        return predictions.squeeze(1)
+        return self.linear(features).squeeze(1)
+
+
+class GRURegressionModel(nn.Module):
+    """A small GRU regressor over fixed-length windows."""
+
+    def __init__(self, feature_count: int, hidden_size: int = 64) -> None:
+        super().__init__()
+        self.gru = nn.GRU(
+            input_size=feature_count,
+            hidden_size=hidden_size,
+            batch_first=True,
+        )
+        self.output = nn.Linear(hidden_size, 1)
+
+    def forward(self, features: torch.Tensor) -> torch.Tensor:
+        _, hidden = self.gru(features)
+        return self.output(hidden[-1]).squeeze(1)
 
 
 def validate_model_backend(model_backend: str) -> None:
@@ -56,7 +72,7 @@ def move_target_stats(
 
 
 def get_model_device(model: nn.Module) -> torch.device:
-    """Return the device used by the linear model parameters."""
+    """Return the device used by the model parameters."""
 
     return next(model.parameters()).device
 
@@ -81,7 +97,7 @@ def make_loader(
     )
 
 
-def train_linear_model(
+def train_torch_model(
     model: nn.Module,
     train_loader: DataLoader,
     valid_split: SplitData,
@@ -90,7 +106,7 @@ def train_linear_model(
     learning_rate: float,
     report_progress: bool = True,
 ) -> None:
-    """Fit the linear regression model."""
+    """Fit one torch-based regression model."""
 
     device = get_model_device(model)
     optimizer = torch.optim.Adam(model.parameters(), lr=learning_rate)
@@ -127,6 +143,9 @@ def train_xgboost_model(
     report_progress: bool,
 ) -> tuple[XGBRegressor, str]:
     """Fit an XGBoost regressor on the raw feature matrix."""
+
+    if train_split.features.ndim != 2:
+        raise ValueError("XGBoost requires a tabular 2D feature matrix.")
 
     xgb_device = "cuda" if device.type == "cuda" else "cpu"
     model = XGBRegressor(
@@ -166,31 +185,36 @@ def train_regressor(
 
     validate_model_backend(model_backend)
 
-    if model_backend == "linear":
-        train_loader = make_loader(train_split, batch_size, shuffle=True, device=device)
-        moved_target_stats = move_target_stats(target_stats, device)
-        torch.manual_seed(RANDOM_SEED)
-        model = LinearRegressionModel(feature_count=train_split.features.shape[1]).to(device)
-        train_linear_model(
-            model=model,
-            train_loader=train_loader,
+    if model_backend == "xgboost":
+        model, backend_device = train_xgboost_model(
+            train_split=train_split,
             valid_split=valid_split,
-            target_stats=moved_target_stats,
             epochs=epochs,
             learning_rate=learning_rate,
+            device=device,
             report_progress=report_progress,
         )
-        return model, moved_target_stats, device.type
+        return model, target_stats, backend_device
 
-    model, backend_device = train_xgboost_model(
-        train_split=train_split,
+    train_loader = make_loader(train_split, batch_size, shuffle=True, device=device)
+    moved_target_stats = move_target_stats(target_stats, device)
+    torch.manual_seed(RANDOM_SEED)
+
+    if model_backend == "linear":
+        model = LinearRegressionModel(feature_count=train_split.features.shape[-1]).to(device)
+    else:
+        model = GRURegressionModel(feature_count=train_split.features.shape[-1]).to(device)
+
+    train_torch_model(
+        model=model,
+        train_loader=train_loader,
         valid_split=valid_split,
+        target_stats=moved_target_stats,
         epochs=epochs,
         learning_rate=learning_rate,
-        device=device,
         report_progress=report_progress,
     )
-    return model, target_stats, backend_device
+    return model, moved_target_stats, device.type
 
 
 def predict_regressor(
@@ -237,7 +261,9 @@ def get_feature_ranking(
 
     if isinstance(model, nn.Module):
         if not hasattr(model, "linear"):
-            raise ValueError("Expected a model with a .linear layer.")
+            raise ValueError(
+                "Feature ranking is only supported for the linear and xgboost backends."
+            )
 
         scores = model.linear.weight.detach().cpu().flatten().tolist()
         score_name = "coefficient"
@@ -258,8 +284,4 @@ def get_feature_ranking(
     )
     frame[abs_score_name] = frame[score_name].abs()
     frame["group"] = frame["feature"].map(infer_feature_group)
-    frame = frame.sort_values(
-        [abs_score_name, "feature"],
-        ascending=[False, True],
-    ).reset_index(drop=True)
-    return frame
+    return frame.sort_values(abs_score_name, ascending=False).reset_index(drop=True)

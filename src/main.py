@@ -1,4 +1,4 @@
-"""Train and evaluate a simple PyTorch regression model for 5-minute netflow traffic."""
+"""Train and evaluate netflow prediction baselines and GRU models."""
 
 from __future__ import annotations
 
@@ -26,7 +26,7 @@ from src.targets import describe_targets
 
 
 def main() -> None:
-    """Train and evaluate the regression baseline."""
+    """Train and evaluate one configured experiment."""
 
     torch.manual_seed(RANDOM_SEED)
     args = parse_args()
@@ -46,6 +46,7 @@ def main() -> None:
                 args.experiment_feature_blocks
             ),
             model_backend=args.model_backend,
+            sequence_length=args.sequence_length,
             epochs=args.epochs,
             learning_rate=args.learning_rate,
             batch_size=args.batch_size,
@@ -59,6 +60,7 @@ def main() -> None:
         target_column=args.target,
         model_backend=args.model_backend,
         feature_blocks=feature_blocks,
+        sequence_length=args.sequence_length,
         epochs=args.epochs,
         learning_rate=args.learning_rate,
         batch_size=args.batch_size,
@@ -71,6 +73,9 @@ def main() -> None:
     print()
     print("Device:")
     print(result.device)
+    print()
+    print("Sequence length:")
+    print(args.sequence_length)
     print()
     print("Feature blocks:")
     print(format_feature_blocks(feature_blocks))
@@ -125,6 +130,9 @@ def main() -> None:
         }
     )
     if args.show_feature_ranking:
+        if args.model_backend == "gru":
+            raise ValueError("Feature ranking is not supported for the gru backend.")
+
         ranking = get_model_feature_ranking(model, feature_columns)
         ranking = filter_ranked_features(
             ranking,
@@ -143,9 +151,7 @@ def main() -> None:
         elif args.permutation_split == "test":
             permutation_split = test_split
         else:
-            raise ValueError(
-                "Permutation split must be 'validation' or 'test'."
-            )
+            raise ValueError("Permutation split must be 'validation' or 'test'.")
         importance = get_grouped_permutation_importance(
             model=model,
             split=permutation_split,
@@ -169,3 +175,7 @@ def main() -> None:
         args.router,
         args.timestamp,
     )
+
+
+if __name__ == "__main__":
+    main()

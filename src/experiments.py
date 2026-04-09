@@ -12,13 +12,9 @@ from xgboost import XGBRegressor
 
 from src.cli import format_feature_blocks
 from src.data import build_feature_frame
-from src.features import add_spectrum_features
-from src.features import add_structure_features
-from src.features import add_target_family_features
 from src.features import choose_feature_columns
 from src.features import filter_feature_rows
-from src.features import spectrum_block_requested
-from src.features import structure_block_requested
+from src.features import prepare_feature_frame
 from src.modeling import ExperimentResult
 from src.modeling import RANDOM_SEED
 from src.modeling import SplitData
@@ -33,12 +29,13 @@ from src.modeling import split_by_time
 from src.modeling import standardize_split
 from src.modeling import standardize_targets
 from src.modeling import to_split
+from src.modeling import validate_target_column
+from src.modeling import validate_target_kind
 from src.regressors import evaluate_regressor
 from src.regressors import train_regressor
 from src.regressors import validate_model_backend
-from src.modeling import validate_target_column
-from src.modeling import validate_target_kind
 from src.reporting import print_experiment_summary
+from src.sequence_data import to_sequence_split
 from src.targets import TargetSpec
 from src.targets import add_next_window_targets
 from src.targets import get_target_spec
@@ -59,23 +56,13 @@ def prepare_experiment_frame(
 ) -> tuple[pd.DataFrame, list[str]]:
     """Build feature columns and filter rows for one experiment."""
 
-    experiment_frame = add_target_family_features(frame, target_spec.source_column)
-
-    if spectrum_block_requested(feature_blocks):
-        experiment_frame = add_spectrum_features(
-            experiment_frame,
-            target_spec.source_column,
-        )
-
-    if structure_block_requested(feature_blocks):
-        experiment_frame = add_structure_features(
-            experiment_frame,
-            target_spec.source_column,
-        )
-
+    experiment_frame = prepare_feature_frame(
+        frame=frame,
+        target_base_column=target_spec.source_column,
+        feature_blocks=feature_blocks,
+    )
     feature_columns = choose_feature_columns(
         experiment_frame,
-        target_spec.source_column,
         feature_blocks=feature_blocks,
     )
     experiment_frame = filter_feature_rows(experiment_frame, feature_columns)
@@ -83,11 +70,51 @@ def prepare_experiment_frame(
     return experiment_frame, feature_columns
 
 
+def make_model_splits(
+    frame: pd.DataFrame,
+    feature_columns: list[str],
+    target_column: str,
+    model_backend: str,
+    sequence_length: int,
+) -> tuple[SplitData, SplitData, SplitData]:
+    """Build train/validation/test tensors for one backend."""
+
+    train_frame, valid_frame, test_frame = split_by_time(frame)
+
+    if model_backend == "gru":
+        train_split = to_sequence_split(
+            train_frame,
+            feature_columns,
+            target_column,
+            sequence_length,
+        )
+        valid_split = to_sequence_split(
+            valid_frame,
+            feature_columns,
+            target_column,
+            sequence_length,
+        )
+        test_split = to_sequence_split(
+            test_frame,
+            feature_columns,
+            target_column,
+            sequence_length,
+        )
+        return train_split, valid_split, test_split
+
+    return (
+        to_split(train_frame, feature_columns, target_column),
+        to_split(valid_frame, feature_columns, target_column),
+        to_split(test_frame, feature_columns, target_column),
+    )
+
+
 def run_regression_experiment_once(
     frame: pd.DataFrame,
     target_column: str,
     model_backend: str,
     feature_blocks: tuple[str, ...],
+    sequence_length: int,
     epochs: int,
     learning_rate: float,
     batch_size: int,
@@ -113,17 +140,20 @@ def run_regression_experiment_once(
         target_column=target_column,
         feature_blocks=feature_blocks,
     )
-    train_frame, valid_frame, test_frame = split_by_time(experiment_frame)
-    train_split = to_split(train_frame, feature_columns, target_column)
-    valid_split = to_split(valid_frame, feature_columns, target_column)
-    test_split = to_split(test_frame, feature_columns, target_column)
+    train_split, valid_split, test_split = make_model_splits(
+        frame=experiment_frame,
+        feature_columns=feature_columns,
+        target_column=target_column,
+        model_backend=model_backend,
+        sequence_length=sequence_length,
+    )
     baseline_valid_metrics = evaluate_baseline_family(valid_split, target_spec)
     baseline_test_metrics = evaluate_baseline_family(test_split, target_spec)
     persistence_valid_metrics = evaluate_persistence_baseline(valid_split, target_spec)
     persistence_test_metrics = evaluate_persistence_baseline(test_split, target_spec)
     target_stats = compute_target_standardization(train_split)
 
-    if model_backend == "linear":
+    if model_backend != "xgboost":
         feature_stats = compute_standardization(train_split)
         train_split = standardize_split(train_split, feature_stats)
         valid_split = standardize_split(valid_split, feature_stats)
@@ -179,6 +209,7 @@ def run_regression_experiment(
     target_column: str,
     model_backend: str,
     feature_blocks: tuple[str, ...],
+    sequence_length: int,
     epochs: int,
     learning_rate: float,
     batch_size: int,
@@ -199,6 +230,7 @@ def run_regression_experiment(
         target_column=target_column,
         model_backend=model_backend,
         feature_blocks=feature_blocks,
+        sequence_length=sequence_length,
         epochs=epochs,
         learning_rate=learning_rate,
         batch_size=batch_size,
@@ -230,6 +262,7 @@ def run_regression_experiment(
         target_column=target_column,
         model_backend=model_backend,
         feature_blocks=feature_blocks,
+        sequence_length=sequence_length,
         epochs=epochs,
         learning_rate=learning_rate,
         batch_size=batch_size,
@@ -243,6 +276,7 @@ def run_experiment_matrix(
     targets: list[str],
     block_configs: list[tuple[str, ...]],
     model_backend: str,
+    sequence_length: int,
     epochs: int,
     learning_rate: float,
     batch_size: int,
@@ -258,7 +292,7 @@ def run_experiment_matrix(
     print(
         "Running experiments: "
         f"{total_experiments} configs, backend={model_backend}, "
-        f"epochs={epochs}, device={device.type}",
+        f"seq_len={sequence_length}, epochs={epochs}, device={device.type}",
         flush=True,
     )
 
@@ -278,6 +312,7 @@ def run_experiment_matrix(
                 target_column=target_column,
                 model_backend=model_backend,
                 feature_blocks=feature_blocks,
+                sequence_length=sequence_length,
                 epochs=epochs,
                 learning_rate=learning_rate,
                 batch_size=batch_size,

@@ -8,11 +8,6 @@ import pandas as pd
 import torch
 from xgboost import XGBRegressor
 
-from src.features import make_spectrum_region_summary_feature_names
-from src.features import make_structure_region_summary_feature_names
-from src.features import make_structure_sd_sample_feature_names
-from src.features import make_structure_summary_feature_names
-from src.features import make_structure_tau_sample_feature_names
 from src.modeling import SplitData
 from src.modeling import TargetStandardization
 from src.modeling import evaluate_predictions
@@ -23,35 +18,17 @@ from src.regressors import predict_regressor
 def infer_feature_group(feature_name: str) -> str:
     """Assign one feature to a readable analysis group."""
 
-    spectrum_region_summary = set(make_spectrum_region_summary_feature_names())
-    structure_region_summary = set(make_structure_region_summary_feature_names())
-    structure_summary = set(make_structure_summary_feature_names())
-    structure_tau = set(make_structure_tau_sample_feature_names())
-    structure_sd = set(make_structure_sd_sample_feature_names())
-
-    if feature_name in spectrum_region_summary:
-        return "spectrum_region_summary"
-
-    if feature_name in structure_region_summary:
-        return "structure_region_summary"
-
-    if feature_name in structure_summary:
-        return "structure_summary"
-
-    if feature_name in structure_tau:
-        return "structure_tau_samples"
-
-    if feature_name in structure_sd:
-        return "structure_sd_samples"
-
-    if feature_name.startswith("structure_"):
-        return "structure_other"
-
     if feature_name.startswith("spectrum_"):
         return "spectrum"
 
+    if feature_name.startswith("structure_"):
+        return "structure"
+
     if feature_name.startswith("router_"):
         return "router"
+
+    if feature_name.startswith("time_"):
+        return "time"
 
     return "base"
 
@@ -70,8 +47,7 @@ def filter_ranked_features(
     mask = ranking["feature"].apply(
         lambda feature: any(feature.startswith(prefix) for prefix in normalized_prefixes)
     )
-    filtered = ranking.loc[mask].reset_index(drop=True)
-    return filtered
+    return ranking.loc[mask].reset_index(drop=True)
 
 
 def get_grouped_permutation_importance(
@@ -88,7 +64,8 @@ def get_grouped_permutation_importance(
     if repeats < 1:
         raise ValueError("Permutation repeats must be at least 1.")
 
-    ranking = get_feature_ranking(model, feature_columns, infer_feature_group)
+    feature_groups = pd.DataFrame({"feature": list(feature_columns)})
+    feature_groups["group"] = feature_groups["feature"].map(infer_feature_group)
     actual_targets = torch.tensor(
         split.frame[split.target_column].to_numpy(dtype="float32")
     )
@@ -97,7 +74,10 @@ def get_grouped_permutation_importance(
     group_rows: list[dict[str, float | str | int]] = []
 
     for group in groups:
-        group_features = ranking.loc[ranking["group"].eq(group), "feature"].tolist()
+        group_features = feature_groups.loc[
+            feature_groups["group"].eq(group),
+            "feature",
+        ].tolist()
 
         if not group_features:
             continue
@@ -116,7 +96,10 @@ def get_grouped_permutation_importance(
             generator.manual_seed(seed + repeat_index)
             permutation = torch.randperm(split.features.shape[0], generator=generator)
             permuted_features = split.features.clone()
-            permuted_features[:, group_indices] = split.features[permutation][:, group_indices]
+            if permuted_features.ndim == 2:
+                permuted_features[:, group_indices] = split.features[permutation][:, group_indices]
+            else:
+                permuted_features[:, :, group_indices] = split.features[permutation][:, :, group_indices]
             permuted_split = SplitData(
                 features=permuted_features,
                 targets=split.targets,
@@ -150,11 +133,10 @@ def get_grouped_permutation_importance(
     if frame.empty:
         return frame
 
-    frame = frame.sort_values(
+    return frame.sort_values(
         ["mean_mae_delta", "group"],
         ascending=[False, True],
     ).reset_index(drop=True)
-    return frame
 
 
 def get_model_feature_ranking(

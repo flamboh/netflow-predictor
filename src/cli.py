@@ -8,15 +8,15 @@ from pathlib import Path
 from src.features import FEATURE_BLOCK_NAMES
 
 
-DEFAULT_TARGET_COLUMN = "next_sa_ipv4_count"
-DEFAULT_FEATURE_BLOCKS = ("target", "general")
+DEFAULT_TARGET_COLUMN = "next_sa_ipv4_count_delta"
+DEFAULT_FEATURE_BLOCKS = ("base",)
 
 
 def parse_args() -> argparse.Namespace:
     """Read command line arguments."""
 
     parser = argparse.ArgumentParser(
-        description="Train a simple PyTorch regression model for 5-minute netflow traffic."
+        description="Train netflow prediction baselines and GRU experiments."
     )
     parser.add_argument(
         "--database",
@@ -43,6 +43,12 @@ def parse_args() -> argparse.Namespace:
         help="Mini-batch size used during training.",
     )
     parser.add_argument(
+        "--sequence-length",
+        type=int,
+        default=12,
+        help="Sequence length used by the GRU backend.",
+    )
+    parser.add_argument(
         "--device",
         type=str,
         default="auto",
@@ -52,7 +58,7 @@ def parse_args() -> argparse.Namespace:
         "--model-backend",
         type=str,
         default="linear",
-        help="Regression backend to use: linear or xgboost.",
+        help="Regression backend to use: linear, xgboost, or gru.",
     )
     parser.add_argument(
         "--router",
@@ -75,18 +81,13 @@ def parse_args() -> argparse.Namespace:
         "--target",
         type=str,
         default=DEFAULT_TARGET_COLUMN,
-        help="Regression target column. Default: next_sa_ipv4_count.",
+        help="Regression target column.",
     )
     parser.add_argument(
         "--feature-blocks",
         type=str,
-        default="target,general",
-        help=(
-            "Comma-separated feature blocks. "
-            "Available: target,general,context,spectrum,spectrum_region_summary,"
-            "structure,structure_summary,structure_tau_samples,"
-            "structure_sd_samples,structure_region_summary."
-        ),
+        default="base",
+        help="Comma-separated feature blocks. Available: base,spectrum,structure.",
     )
     parser.add_argument(
         "--show-feature-ranking",
@@ -113,7 +114,7 @@ def parse_args() -> argparse.Namespace:
     parser.add_argument(
         "--permutation-groups",
         type=str,
-        default="structure_summary,structure_tau_samples,structure_sd_samples",
+        default="base,time,router,spectrum,structure",
         help="Comma-separated feature groups for permutation importance.",
     )
     parser.add_argument(
@@ -136,24 +137,13 @@ def parse_args() -> argparse.Namespace:
     parser.add_argument(
         "--experiment-targets",
         type=str,
-        default="next_sa_ipv4_count_delta",
+        default="next_sa_ipv4_count_delta;next_da_ipv4_count_delta",
         help="Semicolon-separated regression targets for experiment mode.",
     )
     parser.add_argument(
         "--experiment-feature-blocks",
         type=str,
-        default=(
-            "target,general;"
-            "target,general,spectrum;"
-            "target,general,spectrum_region_summary;"
-            "target,general,structure_region_summary;"
-            "target,general,structure_summary;"
-            "target,general,structure_tau_samples;"
-            "target,general,structure_sd_samples;"
-            "target,general,structure_summary,structure_tau_samples;"
-            "target,general,structure_summary,structure_sd_samples;"
-            "target,general,structure"
-        ),
+        default="base;base,spectrum;base,structure;base,spectrum,structure",
         help="Semicolon-separated feature-block configs for experiment mode.",
     )
     return parser.parse_args()

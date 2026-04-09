@@ -4,12 +4,14 @@ from __future__ import annotations
 
 import sqlite3
 from pathlib import Path
+import math
 
 import pandas as pd
 
 
-SECONDS_PER_HOUR = 60 * 60
-SECONDS_PER_DAY = 24 * SECONDS_PER_HOUR
+SECONDS_PER_MINUTE = 60
+SECONDS_PER_DAY = 24 * 60 * SECONDS_PER_MINUTE
+SECONDS_PER_WEEK = 7 * SECONDS_PER_DAY
 
 
 def read_table(connection: sqlite3.Connection, query: str) -> pd.DataFrame:
@@ -120,13 +122,17 @@ def validate_join_features(frame: pd.DataFrame) -> pd.DataFrame:
 
 
 def add_time_features(frame: pd.DataFrame) -> pd.DataFrame:
-    """Create simple clock features from the trace timestamp."""
+    """Create cyclical time features from the trace timestamp."""
 
     enriched = frame.copy()
-    enriched["hour_of_day"] = (enriched["timestamp"] // SECONDS_PER_HOUR) % 24
-    enriched["day_of_week"] = (
-        enriched["timestamp"] // SECONDS_PER_DAY + 3
-    ) % 7
+    minute_of_day = (enriched["timestamp"] % SECONDS_PER_DAY) / SECONDS_PER_MINUTE
+    second_of_week = enriched["timestamp"] % SECONDS_PER_WEEK
+    week_phase = second_of_week / SECONDS_PER_WEEK
+    day_phase = minute_of_day / (SECONDS_PER_DAY / SECONDS_PER_MINUTE)
+    enriched["time_of_day_sin"] = day_phase.map(lambda value: math.sin(2 * math.pi * value))
+    enriched["time_of_day_cos"] = day_phase.map(lambda value: math.cos(2 * math.pi * value))
+    enriched["time_of_week_sin"] = week_phase.map(lambda value: math.sin(2 * math.pi * value))
+    enriched["time_of_week_cos"] = week_phase.map(lambda value: math.cos(2 * math.pi * value))
     return enriched
 
 

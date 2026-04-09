@@ -160,8 +160,9 @@ def to_split(
 def compute_standardization(split: SplitData) -> Standardization:
     """Compute training-set scaling values."""
 
-    mean = split.features.mean(dim=0)
-    std = split.features.std(dim=0)
+    reduce_dims = tuple(range(split.features.ndim - 1))
+    mean = split.features.mean(dim=reduce_dims)
+    std = split.features.std(dim=reduce_dims, correction=0)
     std = torch.where(std == 0, torch.ones_like(std), std)
     return Standardization(mean=mean, std=std)
 
@@ -181,7 +182,7 @@ def compute_target_standardization(split: SplitData) -> TargetStandardization:
     """Compute training-set scaling values for the target."""
 
     mean = split.targets.mean()
-    std = split.targets.std()
+    std = split.targets.std(correction=0)
     std = torch.where(std == 0, torch.ones_like(std), std)
     return TargetStandardization(mean=mean, std=std)
 
@@ -239,49 +240,8 @@ def make_baseline_predictions(
 ) -> torch.Tensor:
     """Build one named naive baseline for the selected target."""
 
-    base_column = target_spec.source_column
-    current_values = frame[base_column].astype("float32")
-    persistence_predictions = pd.Series(
-        make_persistence_predictions(frame, target_spec).numpy(),
-        index=frame.index,
-        dtype="float32",
-    )
-
     if baseline_name == "persistence":
-        return torch.tensor(persistence_predictions.to_numpy(dtype="float32"))
-
-    if baseline_name == "moving_avg_3":
-        rolling_values = frame[f"{base_column}_rolling_mean_3"].astype("float32")
-        if target_spec.task_kind == "exact_count":
-            predictions = rolling_values
-        elif target_spec.task_kind == "delta":
-            predictions = rolling_values - current_values
-        else:
-            raise ValueError(f"Unsupported baseline for {target_spec.task_kind}")
-        predictions = predictions.fillna(persistence_predictions)
-        return torch.tensor(predictions.to_numpy(dtype="float32"))
-
-    if baseline_name == "moving_avg_12":
-        rolling_values = frame[f"{base_column}_rolling_mean_12"].astype("float32")
-        if target_spec.task_kind == "exact_count":
-            predictions = rolling_values
-        elif target_spec.task_kind == "delta":
-            predictions = rolling_values - current_values
-        else:
-            raise ValueError(f"Unsupported baseline for {target_spec.task_kind}")
-        predictions = predictions.fillna(persistence_predictions)
-        return torch.tensor(predictions.to_numpy(dtype="float32"))
-
-    if baseline_name == "lag_12":
-        lag_values = frame[f"{base_column}_lag_12"].astype("float32")
-        if target_spec.task_kind == "exact_count":
-            predictions = lag_values
-        elif target_spec.task_kind == "delta":
-            predictions = lag_values - current_values
-        else:
-            raise ValueError(f"Unsupported baseline for {target_spec.task_kind}")
-        predictions = predictions.fillna(persistence_predictions)
-        return torch.tensor(predictions.to_numpy(dtype="float32"))
+        return make_persistence_predictions(frame, target_spec)
 
     raise ValueError(f"Unknown baseline: {baseline_name}")
 
@@ -305,12 +265,7 @@ def evaluate_baseline_family(
 ) -> dict[str, dict[str, float]]:
     """Evaluate the default family of naive baselines on one split."""
 
-    baseline_names = (
-        "persistence",
-        "moving_avg_3",
-        "moving_avg_12",
-        "lag_12",
-    )
+    baseline_names = ("persistence",)
     actual_targets = torch.tensor(
         split.frame[split.target_column].to_numpy(dtype="float32")
     )
